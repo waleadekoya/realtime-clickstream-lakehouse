@@ -1,0 +1,63 @@
+variable "project" {
+  type        = string
+  description = "Project name prefix"
+}
+
+variable "environment" {
+  type        = string
+  description = "Deployment environment (dev, staging, prod)"
+}
+
+variable "region" {
+  type        = string
+  description = "AWS region"
+}
+
+variable "stream_arn" {
+  type        = string
+  description = "ARN of the Kinesis stream to receive click events"
+}
+
+variable "stream_name" {
+  type        = string
+  description = "Name of the Kinesis stream"
+}
+
+variable "code_s3_bucket" {
+  type        = string
+  description = "S3 bucket where Lambda ZIP will be uploaded"
+}
+
+variable "code_local_path" {
+  type        = string
+  description = "Local path to the Lambda ZIP (e.g. ../etl/handlers/click_handler.zip)"
+}
+
+variable "code_s3_key" {
+  type        = string
+  description = "Key under which to store the Lambda ZIP in S3"
+}
+
+variable "lambda_handler" {
+  type        = string
+  default     = "click_handler.lambda_handler"
+  description = "Lambda handler"
+}
+
+variable "lambda_runtime" {
+  type        = string
+  default     = "python3.11"
+  description = "Lambda runtime"
+}
+
+variable "lambda_timeout" {
+  type        = number
+  default     = 10
+  description = "Lambda timeout in seconds"
+}
+
+variable "lambda_role_arn" {
+  type        = string
+  description = "ARN of the IAM role Lambda will assume"
+}
+

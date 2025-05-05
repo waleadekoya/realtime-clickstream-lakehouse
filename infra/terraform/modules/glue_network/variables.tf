@@ -1,17 +1,6 @@
-variable "project" {
-  type    = string
-  default = "clickstream-lakehouse"
-}
-variable "environment" {
+variable "name_prefix" {
+  description = "Prefix to use for resource naming"
   type        = string
-  description = "Deployment target: dev, staging, prod"
-  default     = "dev"
-}
-
-variable "aws_region" {
-  type    = string
-  description = "AWS region to deploy resources"
-  default = "us-east-1"
 }
 
 variable "vpc_cidr" {
@@ -29,6 +18,20 @@ variable "subnet_cidr" {
 variable "availability_zone" {
   description = "Availability zone for the subnet"
   type        = string
-  default     = "us-east-1a"
 }
 
+variable "connection_name" {
+  description = "Name for the Glue connection"
+  type        = string
+}
+
+variable "tags" {
+  description = "Tags to apply to resources"
+  type        = map(string)
+  default     = {}
+}
+
+variable "region" {
+  type        = string
+  description = "AWS region"
+}

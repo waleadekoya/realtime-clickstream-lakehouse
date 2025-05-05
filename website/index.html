@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Clickstream Demo</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; margin: 2rem; }
+        h1 { color: #333; }
+        p { margin-bottom: 1rem; }
+        button { padding: 0.5rem 1rem; font-size: 1rem; }
+    </style>
+</head>
+<body>
+<h1>Clickstream Lakehouse Demo</h1>
+<p>Click anywhere on the page (even this text!) and we’ll send an event.</p>
+<button id="cta">Click Me!</button>
+
+<script>
+    const API_URL = "https://45ddyzhnj1.execute-api.us-east-1.amazonaws.com/dev/events";
+
+    document.addEventListener("click", (ev) => {
+        const payload = {
+            userAgent: navigator.userAgent,
+            page: location.pathname,
+            element: ev.target.tagName,
+            timestamp: new Date().toISOString()
+        };
+        // Use sendBeacon for fire-and-forget delivery
+        if (!navigator.sendBeacon(API_URL, JSON.stringify(payload))) {
+            // fallback to fetch if sendBeacon fails
+            fetch(API_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+                keepalive: true
+            }).catch(err => console.error("Fetch error:", err));
+        }
+    });
+</script>
+</body>
+</html>
