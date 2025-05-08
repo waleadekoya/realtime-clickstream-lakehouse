@@ -20,6 +20,41 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
+def _get_job_args():
+    logger.info("Reading job arguments...")
+    args = getResolvedOptions(
+        sys.argv,
+        ["JOB_NAME", "STREAM_ARN", "AWS_REGION", "ENVIRONMENT", "S3_BRONZE_BUCKET"]
+    )
+    logger.info(f"Job arguments received: {args}")
+    return args
+
+
+def _initialize_spark_glue():
+    logger.info("Initializing SparkContext and GlueContext...")
+    sc = SparkContext.getOrCreate()
+    glueContext = GlueContext(sc)
+    spark = glueContext.spark_session
+    spark.sparkContext.setLogLevel("WARN")
+    logger.info("GlueContext & SparkSession initialized.")
+    return glueContext, spark
+
+
+def _define_input_schema():
+    logger.info("Defining JSON input schema...")
+    schema = StructType([
+        StructField("element", StringType(), True),
+        StructField("page", StringType(), True),
+        StructField("userAgent", StringType(), True),
+        StructField("timestamp", StringType(), True),
+        StructField("ingest_ts", StringType(), True),
+        StructField("request_id", StringType(), True),
+    ])
+    logger.info("Schema for JSON payload defined.")
+    return schema
+
+
+
 def check_for_kinesis_data(stream_name, aws_region):
     # ─── Direct check for Kinesis data ──────────────────────────────────────────
     try:
@@ -70,227 +105,225 @@ def check_for_kinesis_data(stream_name, aws_region):
         logger.error(f"Error checking Kinesis directly: {err}", exc_info=True)
 
 
-def run_glue_job():
-    # ─── Read job args ──────────────────────────────────────────────────────────
-    args = getResolvedOptions(
-        sys.argv,
-        ["JOB_NAME", "STREAM_ARN", "AWS_REGION", "ENVIRONMENT", "S3_BRONZE_BUCKET"]
-    )
-    JOB_NAME = args["JOB_NAME"]
-    STREAM_ARN = args["STREAM_ARN"]
-    AWS_REGION = args["AWS_REGION"]
-    ENVIRONMENT = args["ENVIRONMENT"]
-    S3_BRONZE_BUCKET = args["S3_BRONZE_BUCKET"]
-
-    logger.info(f"Starting job {JOB_NAME} → stream {STREAM_ARN}")
-
-    # Extract stream name from ARN
-    stream_name = STREAM_ARN.split('/')[-1]
+def _read_from_kinesis_stream(glue_context, stream_arn, aws_region):
+    stream_name = stream_arn.split('/')[-1]
     logger.info(f"Extracted stream name: {stream_name}")
+    check_for_kinesis_data(stream_name, aws_region) # Initial check
 
-    check_for_kinesis_data(stream_name, AWS_REGION)
-
-    # ─── Init Glue & Spark ──────────────────────────────────────────────────────
-    sc = SparkContext.getOrCreate()
-    glueContext = GlueContext(sc)
-    spark = glueContext.spark_session
-    spark.sparkContext.setLogLevel("WARN")
-    logger.info("GlueContext & SparkSession initialized")
-
-    # ─── Define JSON schema ─────────────────────────────────────────────────────
-    schema = StructType([
-        StructField("element", StringType(), True),
-        StructField("page", StringType(), True),
-        StructField("userAgent", StringType(), True),
-        StructField("timestamp", StringType(), True),
-        StructField("ingest_ts", StringType(), True),
-        StructField("request_id", StringType(), True),
-    ])
-    logger.info("Schema for JSON payload defined")
-
-    # ─── Read from Kinesis ──────────────────────────────────────────────────────
     kinesis_opts = {
-        "streamARN": STREAM_ARN,
-        "startingPosition": "TRIM_HORIZON",  # Changed from LATEST to read from the oldest available data
+        "streamARN": stream_arn,
+        "startingPosition": "TRIM_HORIZON",
         "classification": "json",
-        "inferSchema": "true"
+        "inferSchema": "true" # Keep inferSchema for the raw read, will apply defined schema later
     }
-    logger.info(f"Reading from Kinesis stream {STREAM_ARN} with options: {kinesis_opts}")
-    raw_df = glueContext.create_data_frame.from_options(
+    logger.info(f"Reading from Kinesis stream {stream_arn} with options: {kinesis_opts}")
+    raw_df = glue_context.create_data_frame.from_options(
         connection_type="kinesis",
         connection_options=kinesis_opts
     )
-    logger.info("Raw DataFrame schema:")
+    logger.info("Raw DataFrame schema from Kinesis:")
     raw_df.printSchema()
 
-    # ─── Check if data exists ──────────────────────────────────────────────────
-    # Note: With streaming DFs we can't directly check if empty, but we can check schema
-    cols = raw_df.columns
-    if len(cols) == 0:
-        logger.info("No data in stream - exiting job early")
-        return
+    if not raw_df.columns:
+        logger.warning("No data columns found in Kinesis stream after read. Exiting job.")
+        return None
+    return raw_df
 
-    # ─── Identify columns ───────────────────────────────────────────────────────
-    cols = raw_df.columns
-    json_col = cols[0]  # the inferred JSON blob column
-    arrival_col = cols[1] if len(cols) > 1 else None
 
-    # ─── Cast & parse JSON ─────────────────────────────────────────────────────
-    exprs = [f"CAST(`{json_col}` AS STRING) AS json_str"]
-    if arrival_col:
-        exprs.append(f"`{arrival_col}` AS ingest_ts")
+def _transform_data(raw_df, json_schema):
+    logger.info("Starting data transformation...")
+    cols = raw_df.columns
+    if not cols:
+        logger.warning("Raw DataFrame is empty, cannot transform.")
+        return raw_df # Return empty DF
+
+    json_col_name = cols[0]  # Assuming the first column is the JSON blob
+    arrival_col_name = cols[1] if len(cols) > 1 else None
+
+    exprs = [f"CAST(`{json_col_name}` AS STRING) AS json_str"]
+    if arrival_col_name:
+        exprs.append(f"`{arrival_col_name}` AS arrival_ingest_ts") # Use a distinct name if already present in json_schema
 
     parsed_df = (
         raw_df
         .selectExpr(*exprs)
-        .select(from_json(col("json_str"), schema).alias("payload"))
+        .select(from_json(col("json_str"), json_schema).alias("payload"))
         .select("payload.*")
     )
     logger.info("Parsed DataFrame schema (after JSON parsing):")
     parsed_df.printSchema()
 
-    # ─── Convert event timestamp ────────────────────────────────────────────────
-    df2 = parsed_df.withColumn("event_ts", to_timestamp(col("timestamp")))
+    # Use 'ingest_ts' from JSON payload if present, otherwise use Kinesis arrival time
+    # This assumes 'ingest_ts' in your schema is the preferred one.
+    # If Kinesis arrival time is different and also needed, ensure the column names are distinct.
+    # For simplicity, this example prioritizes 'ingest_ts' from the JSON payload if it exists.
+
+    df_with_event_ts = parsed_df.withColumn("event_ts", to_timestamp(col("timestamp")))
     logger.info("DataFrame schema with event_ts:")
-    df2.printSchema()
+    df_with_event_ts.printSchema()
 
-    # ─── Write stream to S3 ─────────────────────────────────────────────────────
-    out_path = f"s3://{S3_BRONZE_BUCKET}/{ENVIRONMENT}/bronze/clicks/"
-    chkpt_path = f"s3://{S3_BRONZE_BUCKET}/{ENVIRONMENT}/checkpoints/clicks/"
-    logger.info(f"Writing to {out_path} (checkpoints at {chkpt_path})")
+    df_with_event_date = df_with_event_ts.withColumn("event_date", to_date(col("event_ts")))
+    logger.info("DataFrame schema with event_date (partition key):")
+    df_with_event_date.printSchema()
+    return df_with_event_date
 
-    # ─── Add a daily partition key ───────────────────────────────────────────────
-    df3 = df2.withColumn("event_date", to_date(col("event_ts")))
 
-    logger.info("Showing df3 schema and sample data:")
-    df3.printSchema()
-
-    # Sample the first few records from the streaming DataFrame with a timeout
+def _collect_sample_data(df, timeout_seconds=30):
+    logger.info("Attempting to collect sample data...")
     sample_data = []
 
-    def collect_sample(batch_df, batch_id):
-        if batch_df.count() > 0 and len(sample_data) == 0:
-            # Take at most 5 records from the first non-empty batch
+    def collect_batch_sample(batch_df, batch_id):
+        if not sample_data and batch_df.count() > 0: # Collect only from the first non-empty batch
+            logger.info(f"Collecting samples from batch {batch_id}...")
             rows = batch_df.limit(5).collect()
             for row in rows:
                 sample_data.append(row.asDict())
-            logger.info(f"Collected {len(sample_data)} sample records from batch {batch_id}")
+            logger.info(f"Collected {len(sample_data)} sample records.")
 
-    # Run a quick-sampling query to collect data
     sample_query = (
-        df3.coalesce(1)
+        df.coalesce(1)
         .writeStream
-        .foreachBatch(collect_sample)
+        .foreachBatch(collect_batch_sample)
         .outputMode("append")
-        .trigger(once=True)  # Process available data at once and terminate
+        .trigger(once=True)
         .start()
     )
 
-    # Wait for the sampling to complete with a timeout
-    logger.info("Waiting for sample data (max 30 seconds)...")
+    logger.info(f"Waiting for sample data collection (max {timeout_seconds} seconds)...")
     start_time = time.time()
-    timeout = 30  # 30-second timeout for sampling
-
     try:
-        # Wait with timeout
-        sample_query.awaitTermination(timeout)
-
-        # Check if we timed out or completed normally
-        if time.time() - start_time >= timeout:
-            logger.info("Sample collection timed out - no data received within timeout period")
+        sample_query.awaitTermination(timeout_seconds)
+        if time.time() - start_time >= timeout_seconds and not sample_data:
+            logger.info("Sample collection timed out - no data received within the period.")
         else:
-            logger.info("Sample collection completed normally")
+            logger.info("Sample collection process completed.")
     except Exception as err:
-        logger.warning(f"Error during sample collection: {err}")
+        logger.warning(f"Error during sample collection: {err}", exc_info=True)
     finally:
-        # Always try to stop the query
-        try:
-            if sample_query.isActive:
+        if sample_query.isActive:
+            try:
                 sample_query.stop()
-                logger.info("Sample query stopped")
-        except Exception as err:
-            logger.warning(f"Error stopping sample query: {err}")
+                logger.info("Sample query stopped.")
+                return None
+            except Exception as e_stop:
+                logger.warning(f"Error stopping sample query: {e_stop}", exc_info=True)
+                return None
 
-        # Log the sample data if any was collected
     if sample_data:
-        logger.info("Sample records from df3:")
+        logger.info("Sample records collected:")
         for idx, record in enumerate(sample_data, start=1):
             logger.info(f"Record {idx}: {record}")
     else:
-        logger.info("No sample records collected from df3 (stream might be empty)")
+        logger.info("No sample records collected (stream might be empty or processing timed out).")
+    return sample_data
 
-    # ─── Fully-managed streaming sink ───────────────────────────────────────────
 
-    # Configure Spark specifically for S3 and Parquet
-    spark.conf.set("spark.sql.shuffle.partitions", "1")  # Use minimal partitions
-    spark.conf.set("spark.sql.streaming.minBatchesToRetain", "1")  # Keep a minimal history
-
-    # Configure Spark for better S3 Parquet writing
+def _configure_spark_for_s3_parquet(spark):
     logger.info("Configuring Spark for S3 and Parquet writing...")
-    spark.conf.set("spark.sql.shuffle.partitions", "1")
+    spark.conf.set("spark.sql.shuffle.partitions", "1") # Re-evaluate for production scale
+    spark.conf.set("spark.sql.streaming.minBatchesToRetain", "1")
     spark.conf.set("spark.sql.parquet.compression.codec", "snappy")
-    spark.conf.set("spark.sql.parquet.mergeSchema", "false")  # Important - disable schema merging
+    spark.conf.set("spark.sql.parquet.mergeSchema", "false") # Global setting
     spark.conf.set("spark.sql.parquet.filterPushdown", "true")
 
+
+def _write_stream_to_s3(df, out_path, chkpt_path, spark_session):
+    logger.info(f"Preparing to write stream to S3: {out_path} (checkpoints at {chkpt_path})")
+
+    _configure_spark_for_s3_parquet(spark_session)
+
     logger.info("Ensuring consistent data types for Parquet conversion...")
-    df3 = df3.select(
+    # Ensure all expected columns are present and cast them
+    # This is important to prevent schema evolution issues if a field is occasionally missing
+    final_df = df.select(
         col("element").cast("string"),
         col("page").cast("string"),
         col("userAgent").cast("string"),
-        col("timestamp").cast("string"),
-        col("ingest_ts").cast("string"),
+        col("timestamp").cast("string"), # Original timestamp string
+        col("ingest_ts").cast("string"), # From JSON payload
         col("request_id").cast("string"),
-        col("event_ts"),
-        col("event_date")
+        col("event_ts"),                 # Derived timestamp type
+        col("event_date")                # Derived date type
     )
+    logger.info("Final DataFrame schema before S3 write:")
+    final_df.printSchema()
 
-    # Log schema after casting
-    logger.info("DataFrame schema after type casting:")
-    df3.printSchema()
-
-    logger.info(f"Starting micro-batch processing at {time.time()}...")
-
+    logger.info(f"Starting micro-batch processing to S3 at {time.time()}...")
     query = (
-        df3.writeStream
+        final_df.writeStream
         .format("parquet")
         .outputMode("append")
         .option("path", out_path)
         .option("checkpointLocation", chkpt_path)
-        .option("mergeSchema", "true")
+        .option("mergeSchema", "true") # Allow schema merging at the sink if necessary
         .partitionBy("event_date")
-        .trigger(availableNow=True)  # Process all available data in one batch
+        .trigger(availableNow=True)
         .start()
     )
-    logger.info(f"Query started with ID {query.id}")
+    logger.info(f"Streaming query started with ID {query.id}")
 
-    # Wait for the query to complete instead of using a timeout
-    logger.info("Waiting for query to complete...")
-    query.awaitTermination()  # Wait for the job to finish
-    logger.info("Query completed successfully")
+    logger.info("Waiting for streaming query to complete...")
+    query.awaitTermination()
+    logger.info("Streaming query completed.")
 
-    def check_data_post_processing():
-        # Add after processing completes
-        s3_client = boto3.client('s3', region_name=AWS_REGION)
-        try:
-            logger.info(f"Checking for output files in: {out_path}")
-            response = s3_client.list_objects_v2(
-                Bucket=S3_BRONZE_BUCKET,
-                Prefix=f"{ENVIRONMENT}/bronze/clicks/"
-            )
 
-            if 'Contents' in response:
-                for item in response['Contents']:
-                    logger.info(f"Found output file: {item['Key']} ({item['Size']} bytes)")
-            else:
-                logger.warning("No output files found!")
-        except Exception as exc:
-            logger.error(f"Error checking for output files: {exc}", exc_info=True)
+def check_data_post_processing(s3_bucket, s3_prefix, aws_region):
+    s3_client = boto3.client('s3', region_name=aws_region)
+    try:
+        logger.info(f"Checking for output files in S3 bucket '{s3_bucket}' with prefix '{s3_prefix}'")
+        response = s3_client.list_objects_v2(Bucket=s3_bucket, Prefix=s3_prefix)
 
-    check_data_post_processing()
+        if 'Contents' in response and response['Contents']:
+            logger.info(f"Found {len(response['Contents'])} output item(s) in S3 at '{s3_bucket}/{s3_prefix}'.")
+            for item in response['Contents'][:5]: # Log first 5 items
+                logger.info(f"  - s3://{s3_bucket}/{item['Key']} (Size: {item['Size']} bytes)")
+            if len(response['Contents']) > 5:
+                logger.info(f"  ... and {len(response['Contents']) - 5} more items.")
+        else:
+            logger.warning(f"No output files found in S3 at '{s3_bucket}/{s3_prefix}'.")
+    except Exception as exc:
+        logger.error(f"Error checking for output files in S3: {exc}", exc_info=True)
 
-    # Allows the job to complete naturally with success status
-    logger.info("Job completed successfully")
-    return
+
+def run_glue_job():
+    job_args = _get_job_args()
+    JOB_NAME = job_args["JOB_NAME"]
+    STREAM_ARN = job_args["STREAM_ARN"]
+    AWS_REGION = job_args["AWS_REGION"]
+    ENVIRONMENT = job_args["ENVIRONMENT"]
+    S3_BRONZE_BUCKET = job_args["S3_BRONZE_BUCKET"]
+
+    logger.info(f"Starting job {JOB_NAME} → stream {STREAM_ARN}")
+
+    glue_context, spark_session = _initialize_spark_glue()
+    input_schema = _define_input_schema()
+
+    raw_kinesis_df = _read_from_kinesis_stream(glue_context, STREAM_ARN, AWS_REGION)
+
+    if raw_kinesis_df is None or not raw_kinesis_df.columns:
+        logger.warning("No data read from Kinesis or DataFrame is empty. Exiting job.")
+        return
+
+    transformed_df = _transform_data(raw_kinesis_df, input_schema)
+
+    if transformed_df is None or not transformed_df.columns:
+        logger.warning("Data transformation resulted in an empty DataFrame. Exiting job.")
+        return
+
+    # Collect sample data for logging/debugging (optional, can be removed in production)
+    _collect_sample_data(transformed_df.limit(10)) # Limit input to sampling for performance
+
+    s3_output_path = f"s3://{S3_BRONZE_BUCKET}/{ENVIRONMENT}/bronze/clicks/"
+    s3_checkpoint_path = f"s3://{S3_BRONZE_BUCKET}/{ENVIRONMENT}/checkpoints/clicks/"
+
+    _write_stream_to_s3(transformed_df, s3_output_path, s3_checkpoint_path, spark_session)
+
+    # Post-processing check
+    output_s3_prefix = f"{ENVIRONMENT}/bronze/clicks/"
+    check_data_post_processing(S3_BRONZE_BUCKET, output_s3_prefix, AWS_REGION)
+
+    logger.info(f"Job {JOB_NAME} completed successfully.")
+
 
 
 if __name__ == "__main__":
@@ -298,7 +331,7 @@ if __name__ == "__main__":
     try:
         run_glue_job()
     except Exception as e:
-        logger.error(f"Job failed: {e}", exc_info=True)
+        logger.error(f"Job failed with unhandled exception: {e}", exc_info=True)
         sys.exit(1)
     finally:
         elapsed = time.time() - start

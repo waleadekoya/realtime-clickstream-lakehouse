@@ -32,3 +32,8 @@ variable "availability_zone" {
   default     = "us-east-1a"
 }
 
+variable "python_command" {
+  description = "Python command to use for local-exec provisioner"
+  type        = string
+  default     = "python"
+}

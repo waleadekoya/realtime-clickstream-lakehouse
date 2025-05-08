@@ -151,3 +151,21 @@ resource "null_resource" "network_cleanup_helper" {
   }
 }
 
+resource "null_resource" "inject_api_url_in_index" {
+  depends_on = [module.ingest_api]
+
+  # Force this to run on every apply using a timestamp or uuid
+  triggers = {
+    # This makes the resource recreate and run on every apply
+    always_run = timestamp()
+  }
+
+
+  provisioner "local-exec" {
+    command = <<EOT
+      ${var.python_command} inject_api_url.py ${module.ingest_api.api_invoke_url}
+    EOT
+  }
+}
+
+
