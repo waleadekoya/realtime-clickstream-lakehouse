@@ -20,7 +20,33 @@ Infrastructure as Code principles.
 
 ## Architecture
 
-![Architecture Diagram](docs/architecture.png)
+```mermaid
+flowchart TD
+    subgraph Client
+        U[User Browser]
+    end
+
+    subgraph AWS
+        direction LR
+        APIGW[API Gateway]
+        Lambda[Lambda Validation & Enrichment]
+        Kinesis[Kinesis Data Streams]
+        Glue[Glue Streaming Job Transform and Write]
+        S3[S3 - Delta Lake]
+        Athena[Athena - BI Tools]
+        CW[CloudWatch Logs and Metrics]
+    end
+
+    U -->|HTTP POST click event| APIGW
+    APIGW -->|Invoke| Lambda
+    Lambda -->|PutRecord| Kinesis
+    Kinesis -->|ReadStream| Glue
+    Glue -->|Write Delta| S3
+    Athena -->|Query| S3
+
+    Lambda -->|Logs and Metrics| CW
+    Glue -->|Metrics| CW
+```
 
 ### Components
 
@@ -66,7 +92,7 @@ Infrastructure as Code principles.
 2. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/yourusername/realtime-clickstream-lakehouse.git
+   git clone https://github.com/waleadekoya/realtime-clickstream-lakehouse.git
    cd realtime-clickstream-lakehouse
    ```
 
@@ -83,20 +109,20 @@ Infrastructure as Code principles.
 1. **Initialize Terraform:**
 
    ```bash
-   cd infrastructure
+   cd infra/terraform
    terraform init
    ```
 
 2. **Review the Plan:**
 
    ```bash
-   terraform plan -var-file=environments/dev.tfvars
+   terraform plan -var-file="tfvars/dev.tfvars" -out="plan-dev.tfplan"
    ```
 
 3. **Deploy the Infrastructure:**
 
    ```bash
-   terraform apply -var-file=environments/dev.tfvars
+   terraform apply "plan-dev.tfplan"
    ```
 
 ### 3. Web Application Setup
@@ -166,7 +192,7 @@ The infrastructure includes cleanup helpers for proper resource termination:
 
 ### Environment Variables
 
-Modify `infrastructure/environments/*.tfvars` files to customize:
+Modify `infra/terraform/tvars/<env>.tfvars` files to customize:
 
 - AWS region
 - Project name and environment
