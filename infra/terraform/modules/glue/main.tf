@@ -52,6 +52,60 @@ resource "aws_glue_job" "click_stream" {
   execution_property {
     max_concurrent_runs = 1
   }
+}
+
+# Glue Database
+resource "aws_glue_catalog_database" "clickstream_db" {
+  name        = "${var.project}_${var.environment}_db"
+  description = "Database for clickstream analytics"
+}
+
+# Glue Table for Delta Lake format data
+resource "aws_glue_catalog_table" "clickstream_table" {
+  name          = "${var.project}_clicks_${var.environment}"
+  database_name = aws_glue_catalog_database.clickstream_db.name
+
+  table_type = "EXTERNAL_TABLE"
+
+  parameters = {
+    "classification" = "delta"
+    "delta.format"   = "delta"
+    "delta.catalog"  = "Glue"
+    "EXTERNAL"       = "TRUE"
+  }
+
+  storage_descriptor {
+    location      = "s3://${var.bronze_bucket_name}/${var.project}/${var.environment}/clicks/"
+    input_format  = "org.apache.hadoop.hive.ql.io.SymlinkTextInputFormat"
+    output_format = "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+
+    ser_de_info {
+      name                  = "delta"
+      serialization_library = "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+    }
+
+    # Schema definition for clickstream data
+    columns {
+      name = "event_id"
+      type = "string"
+    }
+    columns {
+      name = "timestamp"
+      type = "timestamp"
+    }
+    columns {
+      name = "user_id"
+      type = "string"
+    }
+    columns {
+      name = "page_url"
+      type = "string"
+    }
+    columns {
+      name = "event_type"
+      type = "string"
+    }
+  }
 
 }
 
@@ -64,8 +118,9 @@ resource "null_resource" "glue_job_cleanup" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = "aws glue stop-job-run --job-name ${self.triggers.job_name} --region ${self.triggers.region} || true"
+    command = "aws glue batch-stop-job-run --job-name ${self.triggers.job_name} --region ${self.triggers.region} || true"
   }
 
   depends_on = [aws_glue_job.click_stream]
 }
+

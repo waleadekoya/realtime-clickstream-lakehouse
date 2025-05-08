@@ -1,0 +1,162 @@
+name: Deploy Clickstream Infrastructure
+
+permissions:
+  id-token: write       # allow Actions to mint an OIDC token
+  contents: read        # needed by checkout
+
+on:
+#  push:
+#    branches:
+#      - main
+#      - dev
+#      - staging
+#      - prod
+  pull_request:
+    branches:
+      - main
+      - dev
+      - staging
+      - prod
+  workflow_dispatch: # workflow_dispatch for manual triggering with environment parameter
+    inputs:
+      environment:
+        description: 'Environment to deploy (dev, staging, prod)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+
+
+jobs:
+  terraform:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+
+    environment: ${{ matrix.environment }}
+
+    strategy:
+      matrix:
+        environment:
+          # For pull requests, use the target branch to determine environment
+          # For manual workflow, use the selected environment
+          - ${{ github.event.inputs.environment || (github.base_ref == 'main' && 'prod' || github.base_ref == 'staging' && 'staging' || github.base_ref == 'prod' && 'prod' || 'dev') }}
+
+
+    env:
+      TF_VAR_environment: ${{ matrix.environment }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Debug - Print Role ARN
+        run: |
+          echo "Role ARN: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ matrix.environment }}-GitHubActions"
+          echo "Environment: ${{ matrix.environment }}"
+          echo "AWS_REGION: ${{ secrets.AWS_REGION }}"
+          echo "AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}"
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID  }}:role/${{ matrix.environment }}-GitHubActions
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.8.5"
+
+      - name: Terraform Init
+        run: |
+          cd infra/terraform
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ matrix.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ secrets.AWS_REGION }}"
+
+      - name: Terraform Validate
+        run: |
+          cd infra/terraform
+          terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd infra/terraform
+          terraform plan -var-file="tfvars/${{ matrix.environment }}.tfvars" -out=plan-${{ matrix.environment }}.tfplan
+
+      - name: Terraform Apply
+        # Apply in these cases:
+        # 1. Manual workflow run with action=apply
+        # 2. Branch-based push (not PR) to dev/staging/main(prod)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'
+        run: |
+          cd infra/terraform
+          terraform apply plan-${{ matrix.environment }}.tfplan
+
+  run_tests:
+    name: Run ETL Tests
+    runs-on: ubuntu-latest
+    # Only run tests when actually deploying (not just planning)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'
+
+    # ← pick up your per-env secrets (AWS_ACCOUNT_ID, AWS_REGION)
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform CLI
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.8.5"
+
+      - name: Patch Terraform shim (so `terraform` → real binary)
+        run: |
+          TF_DIR=$(dirname "$(which terraform)")
+          mv "$TF_DIR/terraform" "$TF_DIR/terraform-shim"
+          ln -s "$TF_DIR/terraform-bin" "$TF_DIR/terraform"
+
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ github.event.inputs.environment }}-GitHubActions
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install uv CLI
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Create virtual environment
+        run: uv venv --python 3.12
+
+      - name: Install dependencies
+        run: |
+          uv pip install pytest pytest-env boto3 pyspark
+
+      - name: Run ETL tests
+        env:
+          TEST_ENVIRONMENT: ${{ github.event.inputs.environment }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+
+        run: |
+          uv run pytest tests -vv -W ignore::DeprecationWarning:botocore.auth

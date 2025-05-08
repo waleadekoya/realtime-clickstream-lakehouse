@@ -1,11 +1,11 @@
+import logging
 import sys
 import time
-import logging
 
 import boto3
-from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
 from pyspark.sql.functions import col, from_json, to_timestamp, to_date
 from pyspark.sql.types import StructType, StructField, StringType
 
@@ -52,7 +52,6 @@ def _define_input_schema():
     ])
     logger.info("Schema for JSON payload defined.")
     return schema
-
 
 
 def check_for_kinesis_data(stream_name, aws_region):
@@ -108,13 +107,13 @@ def check_for_kinesis_data(stream_name, aws_region):
 def _read_from_kinesis_stream(glue_context, stream_arn, aws_region):
     stream_name = stream_arn.split('/')[-1]
     logger.info(f"Extracted stream name: {stream_name}")
-    check_for_kinesis_data(stream_name, aws_region) # Initial check
+    check_for_kinesis_data(stream_name, aws_region)  # Initial check
 
     kinesis_opts = {
         "streamARN": stream_arn,
         "startingPosition": "TRIM_HORIZON",
         "classification": "json",
-        "inferSchema": "true" # Keep inferSchema for the raw read, will apply defined schema later
+        "inferSchema": "true"  # Keep inferSchema for the raw read, will apply defined schema later
     }
     logger.info(f"Reading from Kinesis stream {stream_arn} with options: {kinesis_opts}")
     raw_df = glue_context.create_data_frame.from_options(
@@ -135,14 +134,15 @@ def _transform_data(raw_df, json_schema):
     cols = raw_df.columns
     if not cols:
         logger.warning("Raw DataFrame is empty, cannot transform.")
-        return raw_df # Return empty DF
+        return raw_df  # Return empty DF
 
     json_col_name = cols[0]  # Assuming the first column is the JSON blob
     arrival_col_name = cols[1] if len(cols) > 1 else None
 
     exprs = [f"CAST(`{json_col_name}` AS STRING) AS json_str"]
     if arrival_col_name:
-        exprs.append(f"`{arrival_col_name}` AS arrival_ingest_ts") # Use a distinct name if already present in json_schema
+        exprs.append(
+            f"`{arrival_col_name}` AS arrival_ingest_ts")  # Use a distinct name if already present in json_schema
 
     parsed_df = (
         raw_df
@@ -173,7 +173,7 @@ def _collect_sample_data(df, timeout_seconds=30):
     sample_data = []
 
     def collect_batch_sample(batch_df, batch_id):
-        if not sample_data and batch_df.count() > 0: # Collect only from the first non-empty batch
+        if not sample_data and batch_df.count() > 0:  # Collect only from the first non-empty batch
             logger.info(f"Collecting samples from batch {batch_id}...")
             rows = batch_df.limit(5).collect()
             for row in rows:
@@ -220,10 +220,10 @@ def _collect_sample_data(df, timeout_seconds=30):
 
 def _configure_spark_for_s3_parquet(spark):
     logger.info("Configuring Spark for S3 and Parquet writing...")
-    spark.conf.set("spark.sql.shuffle.partitions", "1") # Re-evaluate for production scale
+    spark.conf.set("spark.sql.shuffle.partitions", "1")  # Re-evaluate for production scale
     spark.conf.set("spark.sql.streaming.minBatchesToRetain", "1")
     spark.conf.set("spark.sql.parquet.compression.codec", "snappy")
-    spark.conf.set("spark.sql.parquet.mergeSchema", "false") # Global setting
+    spark.conf.set("spark.sql.parquet.mergeSchema", "false")  # Global setting
     spark.conf.set("spark.sql.parquet.filterPushdown", "true")
 
 
@@ -239,11 +239,11 @@ def _write_stream_to_s3(df, out_path, chkpt_path, spark_session):
         col("element").cast("string"),
         col("page").cast("string"),
         col("userAgent").cast("string"),
-        col("timestamp").cast("string"), # Original timestamp string
-        col("ingest_ts").cast("string"), # From JSON payload
+        col("timestamp").cast("string"),  # Original timestamp string
+        col("ingest_ts").cast("string"),  # From JSON payload
         col("request_id").cast("string"),
-        col("event_ts"),                 # Derived timestamp type
-        col("event_date")                # Derived date type
+        col("event_ts"),  # Derived timestamp type
+        col("event_date")  # Derived date type
     )
     logger.info("Final DataFrame schema before S3 write:")
     final_df.printSchema()
@@ -255,7 +255,7 @@ def _write_stream_to_s3(df, out_path, chkpt_path, spark_session):
         .outputMode("append")
         .option("path", out_path)
         .option("checkpointLocation", chkpt_path)
-        .option("mergeSchema", "true") # Allow schema merging at the sink if necessary
+        .option("mergeSchema", "true")  # Allow schema merging at the sink if necessary
         .partitionBy("event_date")
         .trigger(availableNow=True)
         .start()
@@ -275,7 +275,7 @@ def check_data_post_processing(s3_bucket, s3_prefix, aws_region):
 
         if 'Contents' in response and response['Contents']:
             logger.info(f"Found {len(response['Contents'])} output item(s) in S3 at '{s3_bucket}/{s3_prefix}'.")
-            for item in response['Contents'][:5]: # Log first 5 items
+            for item in response['Contents'][:5]:  # Log first 5 items
                 logger.info(f"  - s3://{s3_bucket}/{item['Key']} (Size: {item['Size']} bytes)")
             if len(response['Contents']) > 5:
                 logger.info(f"  ... and {len(response['Contents']) - 5} more items.")
@@ -311,7 +311,7 @@ def run_glue_job():
         return
 
     # Collect sample data for logging/debugging (optional, can be removed in production)
-    _collect_sample_data(transformed_df.limit(10)) # Limit input to sampling for performance
+    _collect_sample_data(transformed_df.limit(10))  # Limit input to sampling for performance
 
     s3_output_path = f"s3://{S3_BRONZE_BUCKET}/{ENVIRONMENT}/bronze/clicks/"
     s3_checkpoint_path = f"s3://{S3_BRONZE_BUCKET}/{ENVIRONMENT}/checkpoints/clicks/"
@@ -323,7 +323,6 @@ def run_glue_job():
     check_data_post_processing(S3_BRONZE_BUCKET, output_s3_prefix, AWS_REGION)
 
     logger.info(f"Job {JOB_NAME} completed successfully.")
-
 
 
 if __name__ == "__main__":

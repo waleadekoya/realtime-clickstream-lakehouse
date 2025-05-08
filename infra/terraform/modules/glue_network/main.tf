@@ -75,6 +75,7 @@ resource "null_resource" "all_vpc_endpoints_cleanup" {
 
   provisioner "local-exec" {
     when    = destroy
+    interpreter = ["bash", "-c"]
     command = <<-EOT
       echo "Ensuring proper cleanup of all VPC endpoints"
 

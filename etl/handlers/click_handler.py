@@ -1,5 +1,8 @@
-import os, json, boto3, time
+import boto3
+import json
 import logging
+import os
+import time
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -14,6 +17,7 @@ except KeyError as e:
 except Exception as e:
     logger.error(f"Failed to initialize Kinesis client: {e}")
     raise
+
 
 def lambda_handler(event, context):
     try:

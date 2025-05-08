@@ -1,0 +1,52 @@
+name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Which environment to destroy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+permissions:
+  id-token: write       # for OIDC
+  contents: read        # for checkout
+
+jobs:
+  destroy:
+    name: Destroy ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ github.event.inputs.environment }}-GitHubActions
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform v1.8.x
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.8.5"
+
+      - name: Terraform Init
+        run: |
+          cd infra/terraform
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ github.event.inputs.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ secrets.AWS_REGION }}"
+
+      - name: Terraform Destroy
+        run: |
+          cd infra/terraform
+          terraform destroy \
+            -auto-approve \
+            -var-file="tfvars/${{ github.event.inputs.environment }}.tfvars"
