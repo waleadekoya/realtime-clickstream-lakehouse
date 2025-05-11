@@ -102,8 +102,7 @@ jobs:
     # Only run tests when actually deploying (not just planning)
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'
 
-    # ← pick up your per-env secrets (AWS_ACCOUNT_ID, AWS_REGION)
-    environment: ${{ env.DEPLOY_ENV }}
+    environment: ${{ vars.DEPLOY_ENV }}
 
     steps:
       - name: Checkout code
