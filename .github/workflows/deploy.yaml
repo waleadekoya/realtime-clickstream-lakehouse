@@ -28,7 +28,7 @@ on:
           - plan
           - apply
 
-env:
+vars:
   DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }}
 
 jobs:
@@ -37,10 +37,10 @@ jobs:
     runs-on: ubuntu-latest
 
     # Use the branch name or manual input to control TF_VAR_environment
-    environment: ${{ env.DEPLOY_ENV }}
+    environment: ${{ vars.DEPLOY_ENV }}
 
     env:
-      TF_VAR_environment: ${{ env.DEPLOY_ENV }}
+      TF_VAR_environment: ${{ vars.DEPLOY_ENV }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
 
@@ -50,15 +50,15 @@ jobs:
 
       - name: Debug - Print Role ARN
         run: |
-          echo "Role ARN: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ env.DEPLOY_ENV }}-GitHubActions"
-          echo "Deployment Environment: ${{ env.DEPLOY_ENV }}"
+          echo "Role ARN: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ vars.DEPLOY_ENV }}-GitHubActions"
+          echo "Deployment Environment: $DEPLOY_ENV"
           echo "AWS_REGION: ${{ secrets.AWS_REGION }}"
           echo "AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}"
 
       - name: Configure AWS Credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ env.DEPLOY_ENV }}-GitHubActions
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ vars.DEPLOY_ENV }}-GitHubActions
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Setup Terraform
@@ -71,7 +71,7 @@ jobs:
           cd infra/terraform
           terraform init \
             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="key=${{ env.DEPLOY_ENV }}/terraform.tfstate" \
+            -backend-config="key=${{ vars.DEPLOY_ENV }}/terraform.tfstate" \
             -backend-config="region=${{ secrets.AWS_REGION }}"
 
       - name: Terraform Validate
@@ -84,8 +84,8 @@ jobs:
         run: |
           cd infra/terraform
           terraform plan \
-            -var-file="tfvars/${{ env.DEPLOY_ENV }}.tfvars" \
-            -out=plan-${{ env.DEPLOY_ENV }}.tfplan
+            -var-file="tfvars/${{ vars.DEPLOY_ENV }}.tfvars" \
+            -out=plan-${{ vars.DEPLOY_ENV }}.tfplan
 
       - name: Terraform Apply
         # Apply in these cases:
@@ -94,7 +94,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'
         run: |
           cd infra/terraform
-          terraform apply plan-${{ env.DEPLOY_ENV }}.tfplan
+          terraform apply plan-${{ vars.DEPLOY_ENV }}.tfplan
 
   run_tests:
     name: Run ETL Tests
