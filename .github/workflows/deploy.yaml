@@ -28,6 +28,8 @@ on:
           - plan
           - apply
 
+env:
+  DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }}
 
 jobs:
   terraform:
@@ -35,21 +37,10 @@ jobs:
     runs-on: ubuntu-latest
 
     # Use the branch name or manual input to control TF_VAR_environment
-    environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }}
-
-#    environment: ${{ matrix.environment }}
-#
-#    strategy:
-#      matrix:
-#        environment:
-#          # For pull requests, use the target branch to determine environment
-#          # For manual workflow, use the selected environment
-#          - ${{ github.event.inputs.environment || (github.base_ref == 'main' && 'prod' || github.base_ref == 'staging' && 'staging' || github.base_ref == 'prod' && 'prod' || 'dev') }}
-
+    environment: ${{ env.DEPLOY_ENV }}
 
     env:
-#      TF_VAR_environment: ${{ matrix.environment }}
-      TF_VAR_environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }}
+      TF_VAR_environment: ${{ env.DEPLOY_ENV }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
 
@@ -59,15 +50,15 @@ jobs:
 
       - name: Debug - Print Role ARN
         run: |
-          echo "Role ARN: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ matrix.environment }}-GitHubActions"
-          echo "Environment: ${{ matrix.environment }}"
+          echo "Role ARN: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ env.DEPLOY_ENV }}-GitHubActions"
+          echo "Deployment Environment: ${{ env.DEPLOY_ENV }}"
           echo "AWS_REGION: ${{ secrets.AWS_REGION }}"
           echo "AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}"
 
       - name: Configure AWS Credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID  }}:role/${{ matrix.environment }}-GitHubActions
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ env.DEPLOY_ENV }}-GitHubActions
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Setup Terraform
@@ -80,7 +71,7 @@ jobs:
           cd infra/terraform
           terraform init \
             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="key=${{ matrix.environment }}/terraform.tfstate" \
+            -backend-config="key=${{ env.DEPLOY_ENV }}/terraform.tfstate" \
             -backend-config="region=${{ secrets.AWS_REGION }}"
 
       - name: Terraform Validate
@@ -92,16 +83,18 @@ jobs:
         id: plan
         run: |
           cd infra/terraform
-          terraform plan -var-file="tfvars/${{ matrix.environment }}.tfvars" -out=plan-${{ matrix.environment }}.tfplan
+          terraform plan \
+            -var-file="tfvars/${{ env.DEPLOY_ENV }}.tfvars" \
+            -out=plan-${{ env.DEPLOY_ENV }}.tfplan
 
       - name: Terraform Apply
         # Apply in these cases:
         # 1. Manual workflow run with action=apply
-        # 2. Branch-based push (not PR) to dev/staging/main(prod)
+        # 2. Branch-based push (not PR) to dev/staging/prod
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'
         run: |
           cd infra/terraform
-          terraform apply plan-${{ matrix.environment }}.tfplan
+          terraform apply plan-${{ env.DEPLOY_ENV }}.tfplan
 
   run_tests:
     name: Run ETL Tests
@@ -110,7 +103,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'
 
     # ← pick up your per-env secrets (AWS_ACCOUNT_ID, AWS_REGION)
-    environment: ${{ github.event.inputs.environment }}
+    environment: ${{ env.DEPLOY_ENV }}
 
     steps:
       - name: Checkout code
