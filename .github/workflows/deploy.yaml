@@ -37,7 +37,8 @@ jobs:
     # ─── Compute deploy_env once ────────────────────────────────────────
     strategy:
       matrix:
-        deploy_env: [ ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }} ]
+        deploy_env: 
+          - ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }}
 
 
     # Use the branch name or manual input to control TF_VAR_environment
@@ -109,7 +110,71 @@ jobs:
 
     strategy:
       matrix:
-        deploy_env: [ ${ { github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name } } ]
+        deploy_env:
+          - ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }}
+
+    environment: ${{ matrix.deploy_env }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform CLI
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.8.5"
+
+      - name: Patch Terraform shim (so `terraform` → real binary)
+        run: |
+          TF_DIR=$(dirname "$(which terraform)")
+          mv "$TF_DIR/terraform" "$TF_DIR/terraform-shim"
+          ln -s "$TF_DIR/terraform-bin" "$TF_DIR/terraform"
+
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ github.event.inputs.environment }}-GitHubActions
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install uv CLI
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+
+      - name: Create virtual environment
+        run: uv venv --python 3.12
+
+      - name: Install dependencies
+        run: |
+          uv pip install pytest pytest-env boto3 pyspark
+
+      - name: Run ETL tests
+        env:
+          TEST_ENVIRONMENT: ${{ matrix.deploy_env }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+
+        run: |
+          uv run pytest tests -vv -W ignore::DeprecationWarning:botocore.auth
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'
+        run: |
+          cd infra/terraform
+          terraform apply plan-${{ matrix.deploy_env }}.tfplan
+
+  run_tests:
+    name: Run ETL Tests
+    runs-on: ubuntu-latest
+    # Only run tests when actually deploying (not just planning)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'
+
+    strategy:
+      matrix:
+        deploy_env: 
+          - ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }}
 
     environment: ${{ matrix.deploy_env }}
 
