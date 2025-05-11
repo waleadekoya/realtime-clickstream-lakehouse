@@ -41,6 +41,7 @@ variable "python_command" {
 variable "delta_jar_source_path" {
   description = "Local filesystem path to Delta Lake core JAR"
   type        = string
+  default = "libs/jars/delta-core_2.12-1.2.1.jar"
 }
 
 variable "delta_jar_key" {
