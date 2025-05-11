@@ -7,6 +7,14 @@ resource "aws_s3_object" "glue_script" {
   content_type = "text/x-python-script"
 }
 
+# ─── Upload Delta Lake core JAR ────────────────────────────────────────────
+resource "aws_s3_object" "delta_core_jar" {
+  bucket = var.scripts_bucket
+  key = "${var.project}/${var.environment}/jars/${var.delta_jar_key}"
+  source = "${path.module}/../../../../${var.delta_jar_source_path}"
+}
+
+
 data "aws_caller_identity" "current" {}
 
 
@@ -47,6 +55,14 @@ resource "aws_glue_job" "click_stream" {
 
     # S3A credentials provider
     "--conf"                             = "spark.hadoop.fs.s3a.aws.credentials.provider=com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+
+    # Delta Lake support: include the Delta core JAR
+    "--extra-jars"                       = "s3://${var.scripts_bucket}/${var.project}/${var.environment}/jars/${var.delta_jar_key}"
+
+    # ── Inject DeltaLake static configs ────────────────────────────────────────
+    "--conf"                            = "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension"
+    "--conf"                            = "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog"
+
 
   }
   execution_property {

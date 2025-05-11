@@ -37,6 +37,10 @@ def _initialize_spark_glue():
     spark = glueContext.spark_session
     spark.sparkContext.setLogLevel("WARN")
     logger.info("GlueContext & SparkSession initialized.")
+
+    # ─── Delta Lake support ────────────────────────────────────────────
+    logger.info("GlueContext & SparkSession initialized (Delta configs injected by Glue job args).")
+
     return glueContext, spark
 
 
@@ -251,7 +255,7 @@ def _write_stream_to_s3(df, out_path, chkpt_path, spark_session):
     logger.info(f"Starting micro-batch processing to S3 at {time.time()}...")
     query = (
         final_df.writeStream
-        .format("parquet")
+        .format("delta")
         .outputMode("append")
         .option("path", out_path)
         .option("checkpointLocation", chkpt_path)

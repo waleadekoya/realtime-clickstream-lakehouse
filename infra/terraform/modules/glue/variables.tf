@@ -71,3 +71,15 @@ variable "default_arguments" {
   type        = map(string)
   default     = {}
 }
+
+variable "delta_jar_source_path" {
+  description = "Local path to the Delta Lake core JAR file"
+  type        = string
+}
+
+variable "delta_jar_key" {
+  description = "S3 key under scripts_bucket for the Delta Lake core JAR"
+  type        = string
+  default     = "delta-core_2.12-1.2.1.jar"
+}
+
