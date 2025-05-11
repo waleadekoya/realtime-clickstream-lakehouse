@@ -56,6 +56,8 @@ module "glue" {
   connection_name   = module.glue_network.connection_name
 
   depends_on = [module.glue_network, module.iam, module.bucket]
+  delta_jar_source_path = var.delta_jar_source_path
+  delta_jar_key         = var.delta_jar_key
 }
 
 module "glue_network" {

@@ -75,61 +75,8 @@ resource "null_resource" "all_vpc_endpoints_cleanup" {
 
   provisioner "local-exec" {
     when    = destroy
-    interpreter = ["bash", "-c"]
-    command = <<-EOT
-      echo "Ensuring proper cleanup of all VPC endpoints"
+    command = "python ${path.module}/scripts/cleanup_vpc_endpoints.py --region ${self.triggers.region} --endpoints ${self.triggers.kinesis_endpoint_id},${self.triggers.glue_endpoint_id},${self.triggers.logs_endpoint_id}"
 
-      # Create array of endpoint IDs
-      ENDPOINT_IDS=("${self.triggers.kinesis_endpoint_id}" "${self.triggers.glue_endpoint_id}" "${self.triggers.logs_endpoint_id}")
-
-      for ENDPOINT_ID in "$${ENDPOINT_IDS[@]}"; do
-        echo "Processing VPC endpoint: $ENDPOINT_ID"
-
-        # First attempt to delete the endpoint directly
-        echo "Attempting to delete VPC endpoint..."
-        aws ec2 delete-vpc-endpoints --region ${self.triggers.region} --vpc-endpoint-ids $ENDPOINT_ID || true
-
-        # Wait a bit for deletion to take effect
-        sleep 20
-
-        # Check if endpoint is still around
-        ENDPOINT_STATE=$(aws ec2 describe-vpc-endpoints --region ${self.triggers.region} --vpc-endpoint-ids $ENDPOINT_ID --query 'VpcEndpoints[0].State' --output text 2>/dev/null || echo "deleted")
-
-        if [ "$ENDPOINT_STATE" != "deleted" ] && [ "$ENDPOINT_STATE" != "None" ]; then
-          echo "VPC Endpoint still exists, state: $ENDPOINT_STATE"
-
-          # Find ENIs associated with this endpoint
-          ENDPOINT_ENIs=$(aws ec2 describe-network-interfaces --region ${self.triggers.region} --filters "Name=vpc-endpoint-id,Values=$ENDPOINT_ID" --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)
-
-          if [ ! -z "$ENDPOINT_ENIs" ]; then
-            echo "Found ENIs associated with VPC endpoint: $ENDPOINT_ENIs"
-
-            for ENI_ID in $ENDPOINT_ENIs; do
-              echo "Working on ENI $ENI_ID"
-
-              # Force detachment if attached
-              ATTACHMENT_ID=$(aws ec2 describe-network-interfaces --region ${self.triggers.region} --network-interface-ids $ENI_ID --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text)
-
-              if [ "$ATTACHMENT_ID" != "None" ] && [ "$ATTACHMENT_ID" != "null" ]; then
-                echo "Detaching ENI $ENI_ID (attachment: $ATTACHMENT_ID)"
-                aws ec2 detach-network-interface --region ${self.triggers.region} --attachment-id $ATTACHMENT_ID --force || true
-                sleep 10  # Wait for detachment
-              fi
-
-              # Try to delete the ENI
-              echo "Attempting to delete ENI $ENI_ID"
-              aws ec2 delete-network-interface --region ${self.triggers.region} --network-interface-id $ENI_ID || true
-            done
-          fi
-
-          # Try one more time to delete the endpoint
-          echo "Retrying deletion of VPC endpoint..."
-          aws ec2 delete-vpc-endpoints --region ${self.triggers.region} --vpc-endpoint-ids $ENDPOINT_ID || true
-        else
-          echo "VPC Endpoint successfully deleted or already gone"
-        fi
-      done
-    EOT
   }
 
   depends_on = [
@@ -164,39 +111,8 @@ resource "null_resource" "vpc_eni_cleanup" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = <<-EOT
-      echo "Waiting for all services to release ENIs..."
-      sleep 30  # Give services time to start cleanup
+    command = "python ${path.module}/scripts/cleanup_vpc_enis.py --region ${self.triggers.region} --vpc-id ${self.triggers.vpc_id}"
 
-      # Find any lingering ENIs in the VPC and detach/delete them
-      for ATTEMPT in {1..5}; do
-        echo "Cleanup attempt $ATTEMPT..."
-        ENI_IDS=$(aws ec2 describe-network-interfaces --region ${self.triggers.region} --filters Name=vpc-id,Values=${self.triggers.vpc_id} --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)
-
-        if [ -z "$ENI_IDS" ]; then
-          echo "No ENIs found, exiting cleanup"
-          exit 0
-        fi
-
-        for ENI_ID in $ENI_IDS; do
-          echo "Working on ENI $ENI_ID"
-
-          # Check if ENI has an attachment
-          ATTACHMENT_ID=$(aws ec2 describe-network-interfaces --region ${self.triggers.region} --network-interface-ids $ENI_ID --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text)
-
-          if [ "$ATTACHMENT_ID" != "None" ] && [ "$ATTACHMENT_ID" != "null" ]; then
-            echo "Detaching ENI $ENI_ID (attachment: $ATTACHMENT_ID)"
-            aws ec2 detach-network-interface --region ${self.triggers.region} --attachment-id $ATTACHMENT_ID --force || true
-            sleep 10  # Wait longer for detachment
-          fi
-
-          echo "Attempting to delete ENI $ENI_ID"
-          aws ec2 delete-network-interface --region ${self.triggers.region} --network-interface-id $ENI_ID || true
-        done
-
-        sleep 30  # Wait between attempts
-      done
-    EOT
   }
 
   # depends_on = [aws_vpc.glue_vpc]

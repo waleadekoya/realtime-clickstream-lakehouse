@@ -37,3 +37,16 @@ variable "python_command" {
   type        = string
   default     = "python"
 }
+
+variable "delta_jar_source_path" {
+  description = "Local filesystem path to Delta Lake core JAR"
+  type        = string
+  default = "libs/jars/delta-core_2.12-1.2.1.jar"
+}
+
+variable "delta_jar_key" {
+  description = "Filename/key for Delta Lake core JAR in S3"
+  type        = string
+  default     = "delta-core_2.12-1.2.1.jar"
+}
+
