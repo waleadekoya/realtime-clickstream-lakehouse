@@ -37,7 +37,8 @@ jobs:
     # ─── Compute deploy_env once ────────────────────────────────────────
     strategy:
       matrix:
-        deploy_env: [ ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }} ]
+        deploy_env:
+          - ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }}
 
 
     # Use the branch name or manual input to control TF_VAR_environment
@@ -109,7 +110,8 @@ jobs:
 
     strategy:
       matrix:
-        deploy_env: [ ${ { github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name } } ]
+        deploy_env:
+          - ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || github.ref_name }}
 
     environment: ${{ matrix.deploy_env }}
 
