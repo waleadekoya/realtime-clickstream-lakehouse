@@ -111,7 +111,7 @@ resource "null_resource" "vpc_eni_cleanup" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = "python ${path.module}/scripts/cleanup_vpc_enis.py --region ${self.triggers.region} --vpc-id ${self.triggers.vpc_id}"
+    command = "python ${path.module}/scripts/cleanup_vpc_enis.py --region ${self.triggers.region} --endpoints ${self.triggers.vpc_id}"
 
   }
 
