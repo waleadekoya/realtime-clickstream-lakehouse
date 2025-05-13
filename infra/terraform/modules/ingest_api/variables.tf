@@ -61,3 +61,19 @@ variable "lambda_role_arn" {
   description = "ARN of the IAM role Lambda will assume"
 }
 
+variable "registry_name" {
+  type        = string
+  description = "Name of the Glue Schema registry"
+}
+
+variable "schema_name" {
+    type        = string
+    description = "Name of the Glue Schema"
+}
+
+variable "source_code_hash" {
+  description = "Hash of the source code to detect changes"
+  type        = string
+  default     = null
+}
+

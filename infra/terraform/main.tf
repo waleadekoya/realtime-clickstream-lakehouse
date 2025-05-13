@@ -28,15 +28,6 @@ module "bucket" {
   environment = var.environment
 }
 
-module "iam" {
-  source      = "./modules/iam"
-  project     = var.project
-  environment = var.environment
-  stream_arn  = module.stream.stream_arn
-  bucket_arn  = module.bucket.bucket_arn
-  region      = var.aws_region
-}
-
 # ---------- Glue streaming job ----------
 module "glue" {
   source            = "./modules/glue"
@@ -55,9 +46,25 @@ module "glue" {
   subnet_id         = module.glue_network.subnet_id
   connection_name   = module.glue_network.connection_name
 
-  depends_on = [module.glue_network, module.iam, module.bucket]
   delta_jar_source_path = var.delta_jar_source_path
   delta_jar_key         = var.delta_jar_key
+
+  schema_registry_source_path = var.schema_registry_source_path
+  schema_registry_jar_key     = var.schema_registry_jar_key
+
+  depends_on = [module.glue_network, module.iam, module.bucket]
+}
+
+module "iam" {
+  source      = "./modules/iam"
+  project     = var.project
+  environment = var.environment
+  stream_arn  = module.stream.stream_arn
+  bucket_arn  = module.bucket.bucket_arn
+  region      = var.aws_region
+
+  depends_on = []
+
 }
 
 module "glue_network" {
@@ -94,12 +101,20 @@ module "ingest_api" {
 
   # S3 key for the Lambda code & code packaging
   code_s3_bucket  = module.bucket.bucket_name
-  code_local_path = "${path.module}/../../etl/handlers/click_handler.zip"
+  code_local_path = "${path.module}/../../etl/handlers/click_handler.py"
   code_s3_key     = "${var.project}/${var.environment}/click_handler.zip"
+
+  # Add a source_code_hash parameter that changes when code changes
+  source_code_hash = filebase64sha256("${path.module}/../../etl/handlers/click_handler.py")
+
 
   lambda_handler = "click_handler.lambda_handler"
 
-  depends_on = [module.bucket, module.stream, module.iam]
+  # Schema registry information
+  registry_name = module.glue.schema_registry_name
+  schema_name   = module.glue.schema_name
+
+  depends_on = [module.bucket, module.stream, module.iam, module.glue]
 
 }
 

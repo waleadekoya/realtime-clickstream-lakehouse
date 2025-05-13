@@ -77,9 +77,20 @@ variable "delta_jar_source_path" {
   type        = string
 }
 
+variable "schema_registry_source_path" {
+  description = "Local path to the AWS Glue Schema Registry client JAR file"
+  type        = string
+}
+
 variable "delta_jar_key" {
   description = "S3 key under scripts_bucket for the Delta Lake core JAR"
   type        = string
   default     = "delta-core_2.12-1.2.1.jar"
+}
+
+variable "schema_registry_jar_key" {
+  description = "Filename of the AWS Glue Schema Registry client JAR in libs/jars"
+  type        = string
+  default     = "schema-registry-serde-1.1.23.jar"
 }
 
