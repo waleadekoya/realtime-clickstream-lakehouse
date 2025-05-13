@@ -55,7 +55,14 @@ output "ingest_lambda_role" {
   value       = module.iam.lambda_exec_role_arn
 }
 
+# Output registry and schema names for other modules to use
+output "schema_registry_name" {
+  value = module.glue.schema_registry_name
+}
 
+output "schema_name" {
+  value = module.glue.schema_name
+}
 
 
 

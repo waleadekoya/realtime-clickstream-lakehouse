@@ -14,6 +14,8 @@ resource "aws_iam_role" "glue_job" {
   tags               = { Project = var.project, Environment = var.environment }
 }
 
+data "aws_caller_identity" "current" {}
+
 data "aws_iam_policy_document" "glue_policy" {
   statement {
     sid = "ReadKinesis"
@@ -53,6 +55,25 @@ data "aws_iam_policy_document" "glue_policy" {
       "logs:PutLogEvents"
     ]
     resources = ["arn:aws:logs:*:*:*"]
+  }
+  statement {
+    sid       = "AllowGlueSchemaRegistry"
+    actions   = [
+      "glue:GetRegistry",
+      "glue:CreateSchema", // If the job might need to create schemas dynamically (less common with IaC)
+      "glue:GetSchema",
+      "glue:UpdateSchema", // If the job might update schemas (less common with IaC)
+      "glue:DeleteSchema", // If the job might delete schemas (less common with IaC)
+      "glue:ListSchemas",
+      "glue:GetSchemaVersion",
+      "glue:GetSchemaByDefinition",
+      "glue:RegisterSchemaVersion", // If the job registers new versions of the schema
+      "glue:PutSchemaVersionMetadata",
+    ]
+    resources = [
+      "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:registry/*",
+      "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:schema/*"
+    ]
   }
 }
 resource "aws_iam_role_policy" "glue_job_policy" {
@@ -138,6 +159,24 @@ data "aws_iam_policy_document" "lambda_policy" {
     ]
     resources = ["arn:aws:logs:${var.region}:*:*"]
   }
+  statement {
+    sid       = "SchemaRegistryAccess"
+    actions   = [
+      "glue:GetRegistry",
+      "glue:GetSchema",
+      "glue:GetSchemaVersion",
+      "glue:CheckSchemaVersionValidity",
+      "glue:ListSchemas",
+      "glue:ListSchemaVersions",
+      "glue:RegisterSchemaVersion",
+      "glue:PutSchemaVersionMetadata"
+    ]
+    resources = [
+      "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:registry/*",
+      "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:schema/*"
+    ]
+  }
+
 }
 
 resource "aws_iam_role_policy" "lambda_exec_policy" {
