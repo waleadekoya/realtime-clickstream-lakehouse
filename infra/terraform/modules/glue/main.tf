@@ -7,16 +7,63 @@ resource "aws_s3_object" "glue_script" {
   content_type = "text/x-python-script"
 }
 
-# ─── Upload Delta Lake core JAR ────────────────────────────────────────────
+# ─── Upload Delta Lake core JAR ────
 resource "aws_s3_object" "delta_core_jar" {
   bucket = var.scripts_bucket
   key = "${var.project}/${var.environment}/jars/${var.delta_jar_key}"
   source = "${path.module}/../../../../${var.delta_jar_source_path}"
 }
 
+# ─── Upload AWS Glue Schema Registry client JAR ─────
+resource "aws_s3_object" "schema_registry_jar" {
+  bucket = var.scripts_bucket
+  key    = "${var.project}/${var.environment}/jars/${var.schema_registry_jar_key}"
+  source = "${path.module}/../../../../${var.schema_registry_source_path}"
+}
+
 
 data "aws_caller_identity" "current" {}
 
+
+# ─── AWS Glue Schema Registry ──────
+resource "aws_glue_registry" "click_stream_registry" {
+  registry_name        = "${var.project}-${var.environment}-registry"
+  description = "Schema registry for ${var.project} ${var.environment} environment."
+  tags = {
+    Project     = var.project
+    Environment = var.environment
+  }
+}
+
+resource "aws_glue_schema" "click_stream_schema" {
+  registry_arn = aws_glue_registry.click_stream_registry.arn
+  schema_name     = "${var.project}-clickstream-schema-${var.environment}"
+  data_format     = "JSON" # Or AVRO, depending on your Kinesis producer and preference
+  compatibility   = "BACKWARD" # Or NONE, FORWARD, FULL etc.
+  description     = "Schema for incoming clickstream events."
+
+  # Schema definition based on the _define_input_schema() from glue_stream.py
+  # element, page, userAgent, timestamp, ingest_ts, request_id
+  schema_definition = jsonencode({
+    type = "object",
+    properties = {
+      element    = { type = "string", description = "Clicked element identifier" },
+      page       = { type = "string", description = "Page URL where the event occurred" },
+      userAgent  = { type = "string", description = "User agent string of the client" },
+      timestamp  = { type = "string", format = "date-time", description = "Timestamp of the event (ISO 8601 string)" },
+      ingest_ts  = { type = "string", format = "date-time", description = "Timestamp when the event was ingested (ISO 8601 string)" },
+      request_id = { type = "string", description = "Unique identifier for the request" }
+    },
+    # Assume all fields are optional as per Python StructField(..., True)
+    # If some fields are mandatory, add them to a "required" array:
+    # "required": ["request_id", "timestamp"]
+  })
+
+  tags = {
+    Project     = var.project
+    Environment = var.environment
+  }
+}
 
 
 # 2. Create the Glue streaming job
@@ -56,13 +103,22 @@ resource "aws_glue_job" "click_stream" {
     # S3A credentials provider
     "--conf"                             = "spark.hadoop.fs.s3a.aws.credentials.provider=com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
 
-    # Delta Lake support: include the Delta core JAR
-    "--extra-jars"                       = "s3://${var.scripts_bucket}/${var.project}/${var.environment}/jars/${var.delta_jar_key}"
-
     # ── Inject DeltaLake static configs ────────────────────────────────────────
     "--conf"                            = "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension"
     "--conf"                            = "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog"
 
+    # Glue Schema Registry  & Delta Lake support support
+
+    "--extra-jars"                       = join(",", [
+      "s3://${var.scripts_bucket}/${var.project}/${var.environment}/jars/${var.delta_jar_key}",
+      "s3://${var.scripts_bucket}/${var.project}/${var.environment}/jars/${var.schema_registry_jar_key}"
+    ])
+
+    # Glue Schema Registry arguments to be used by the ETL script
+    "--glue.schemaRegistry.registryName" = "${var.project}-${var.environment}-registry"
+    "--glue.schemaRegistry.schemaName"   = "${var.project}-clickstream-schema-${var.environment}"
+    "--glue.schemaRegistry.region"       = var.region
+    "--glue.schemaRegistry.dataFormat"   = "JSON"
 
   }
   execution_property {

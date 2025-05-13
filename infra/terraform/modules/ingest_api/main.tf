@@ -6,6 +6,16 @@ locals {
 
   # location to write the ZIP
   zip_path    = "${path.module}/build/click_handler.zip"
+
+  # Calculate hash of the source file
+  source_hash = filebase64sha256(local.handler_src)
+
+}
+
+# Create the build directory if it doesn't exist
+resource "local_file" "ensure_build_dir" {
+  filename = "${path.module}/build/.keep"
+  content  = "This file ensures the build directory exists"
 }
 
 
@@ -15,18 +25,17 @@ data "archive_file" "handler_zip" {
   source_file = local.handler_src
   output_path = local.zip_path
 
+  depends_on = [local_file.ensure_build_dir]
+
 }
-
-
 
 # 1. Upload the Lambda ZIP to S3
 resource "aws_s3_object" "lambda_zip" {
   bucket       = var.code_s3_bucket
   key          = var.code_s3_key
-
   source       = data.archive_file.handler_zip.output_path
-
   content_type = "application/zip"
+  etag         = filemd5(data.archive_file.handler_zip.output_path)
 
 }
 
@@ -47,6 +56,8 @@ resource "aws_lambda_function" "ingest" {
     variables = {
       STREAM_NAME = var.stream_name
       REGION      = var.region
+      REGISTRY_NAME = var.registry_name
+      SCHEMA_NAME   = var.schema_name
     }
   }
 

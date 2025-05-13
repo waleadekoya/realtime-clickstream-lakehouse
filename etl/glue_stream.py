@@ -24,7 +24,17 @@ def _get_job_args():
     logger.info("Reading job arguments...")
     args = getResolvedOptions(
         sys.argv,
-        ["JOB_NAME", "STREAM_ARN", "AWS_REGION", "ENVIRONMENT", "S3_BRONZE_BUCKET"]
+        [
+            "JOB_NAME",
+            "STREAM_ARN",
+            "AWS_REGION",
+            "ENVIRONMENT",
+            "S3_BRONZE_BUCKET",
+            "glue.schemaRegistry.registryName",
+            "glue.schemaRegistry.schemaName",
+            "glue.schemaRegistry.region",
+            "glue.schemaRegistry.dataFormat",
+        ]
     )
     logger.info(f"Job arguments received: {args}")
     return args
@@ -108,24 +118,46 @@ def check_for_kinesis_data(stream_name, aws_region):
         logger.error(f"Error checking Kinesis directly: {err}", exc_info=True)
 
 
-def _read_from_kinesis_stream(glue_context, stream_arn, aws_region):
+def _read_from_kinesis_stream(glue_context, stream_arn, aws_region, registry_name, schema_name, data_format):
     stream_name = stream_arn.split('/')[-1]
     logger.info(f"Extracted stream name: {stream_name}")
     check_for_kinesis_data(stream_name, aws_region)  # Initial check
 
+
+    logger.info(f"Using schema registry: {registry_name}, schema: {schema_name}")
+
     kinesis_opts = {
         "streamARN": stream_arn,
         "startingPosition": "TRIM_HORIZON",
-        "classification": "json",
-        "inferSchema": "true"  # Keep inferSchema for the raw read, will apply defined schema later
+        "classification": data_format.lower(),
+        "inferSchema": "false",  # use the registry
+        "validateSchema": "true",
+        "awsGlueSchemaRegistryName": registry_name,
+        "awsGlueSchemaRegistrySchemaName": schema_name,
     }
-    logger.info(f"Reading from Kinesis stream {stream_arn} with options: {kinesis_opts}")
-    raw_df = glue_context.create_data_frame.from_options(
-        connection_type="kinesis",
-        connection_options=kinesis_opts
-    )
-    logger.info("Raw DataFrame schema from Kinesis:")
-    raw_df.printSchema()
+    logger.info(f"Reading from Kinesis stream {stream_arn} with Schema Registry validation options: {kinesis_opts}")
+
+    try:
+
+        raw_df = glue_context.create_data_frame.from_options(
+            connection_type="kinesis",
+            connection_options=kinesis_opts
+        )
+        logger.info("Raw DataFrame schema from Kinesis with Schema Registry validation:")
+        raw_df.printSchema()
+    except Exception as err:
+        logger.error(f"Error reading from Kinesis with Schema Registry validation: {e}", exc_info=True)
+        fallback_opts = {
+            "streamARN": stream_arn,
+            "startingPosition": "TRIM_HORIZON",
+            "classification": "json",
+            "inferSchema": "true"
+        }
+        raw_df = glue_context.create_data_frame.from_options(
+            connection_type="kinesis",
+            connection_options=fallback_opts
+        )
+        logger.warning("Reading without schema validation succeeded")
 
     if not raw_df.columns:
         logger.warning("No data columns found in Kinesis stream after read. Exiting job.")
@@ -297,12 +329,26 @@ def run_glue_job():
     ENVIRONMENT = job_args["ENVIRONMENT"]
     S3_BRONZE_BUCKET = job_args["S3_BRONZE_BUCKET"]
 
+    # Schema Registry parameters
+    REGISTRY_NAME = job_args["glue.schemaRegistry.registryName"]
+    SCHEMA_NAME = job_args["glue.schemaRegistry.schemaName"]
+    DATA_FORMAT = job_args["glue.schemaRegistry.dataFormat"]
+
+    logger.info(f"Starting job {JOB_NAME} → stream {STREAM_ARN} using schema {REGISTRY_NAME}/{SCHEMA_NAME}")
+
     logger.info(f"Starting job {JOB_NAME} → stream {STREAM_ARN}")
 
     glue_context, spark_session = _initialize_spark_glue()
     input_schema = _define_input_schema()
 
-    raw_kinesis_df = _read_from_kinesis_stream(glue_context, STREAM_ARN, AWS_REGION)
+    raw_kinesis_df = _read_from_kinesis_stream(
+        glue_context,
+        STREAM_ARN,
+        AWS_REGION,
+        REGISTRY_NAME,
+        SCHEMA_NAME,
+        DATA_FORMAT
+    )
 
     if raw_kinesis_df is None or not raw_kinesis_df.columns:
         logger.warning("No data read from Kinesis or DataFrame is empty. Exiting job.")
