@@ -62,3 +62,17 @@ variable "schema_registry_jar_key" {
   default     = "schema-registry-serde-1.1.23.jar"
 }
 
+variable "lambda_layer_s3_bucket" {
+  type        = string
+  default = ""
+}
+
+variable "lambda_layer_s3_key" {
+  type        = string
+  default = ""
+}
+
+variable "lambda_layer_local_path" {
+  type        = string
+  default = ""
+}

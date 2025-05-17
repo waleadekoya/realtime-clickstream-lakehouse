@@ -167,36 +167,45 @@ def _read_from_kinesis_stream(glue_context, stream_arn, aws_region, registry_nam
 
 def _transform_data(raw_df, json_schema):
     logger.info("Starting data transformation...")
-    cols = raw_df.columns
-    if not cols:
+    # cols = raw_df.columns
+    # if not cols:
+    #     logger.warning("Raw DataFrame is empty, cannot transform.")
+    #     return raw_df  # Return empty DF
+
+    # json_col_name = cols[0]  # Assuming the first column is the JSON blob
+    # arrival_col_name = cols[1] if len(cols) > 1 else None
+
+    # exprs = [f"CAST(`{json_col_name}` AS STRING) AS json_str"]
+    # if arrival_col_name:
+    #     exprs.append(
+    #         f"`{arrival_col_name}` AS arrival_ingest_ts")  # Use a distinct name if already present in json_schema
+
+    # parsed_df = (
+    #     raw_df
+    #     .selectExpr(*exprs)
+    #     .select(from_json(col("json_str"), json_schema).alias("payload"))
+    #     .select("payload.*")
+    # )
+    # logger.info("Parsed DataFrame schema (after JSON parsing):")
+    if not raw_df.columns:
         logger.warning("Raw DataFrame is empty, cannot transform.")
-        return raw_df  # Return empty DF
-
-    json_col_name = cols[0]  # Assuming the first column is the JSON blob
-    arrival_col_name = cols[1] if len(cols) > 1 else None
-
-    exprs = [f"CAST(`{json_col_name}` AS STRING) AS json_str"]
-    if arrival_col_name:
-        exprs.append(
-            f"`{arrival_col_name}` AS arrival_ingest_ts")  # Use a distinct name if already present in json_schema
-
-    parsed_df = (
-        raw_df
-        .selectExpr(*exprs)
-        .select(from_json(col("json_str"), json_schema).alias("payload"))
-        .select("payload.*")
-    )
-    logger.info("Parsed DataFrame schema (after JSON parsing):")
+        return raw_df
+    parsed_df = raw_df  # each field already a column after SR deserialisation
     parsed_df.printSchema()
+    parsed_df.select("timestamp", "event_ts", "event_date").show(5, truncate=False)
 
     # Use 'ingest_ts' from JSON payload if present, otherwise use Kinesis arrival time
     # This assumes 'ingest_ts' in your schema is the preferred one.
     # If Kinesis arrival time is different and also needed, ensure the column names are distinct.
     # For simplicity, this example prioritizes 'ingest_ts' from the JSON payload if it exists.
-
-    df_with_event_ts = parsed_df.withColumn("event_ts", to_timestamp(col("timestamp")))
+    iso_fmt = "yyyy-MM-dd'T'HH:mm:ss[.SSS]X"
+    df_with_event_ts = (
+        parsed_df.withColumn(
+            "event_ts", to_timestamp(col("timestamp"), iso_fmt))
+    )
     logger.info("DataFrame schema with event_ts:")
     df_with_event_ts.printSchema()
+    parsed_df.select("timestamp", "event_ts", "event_date").show(5, truncate=False)
 
     df_with_event_date = df_with_event_ts.withColumn("event_date", to_date(col("event_ts")))
     logger.info("DataFrame schema with event_date (partition key):")

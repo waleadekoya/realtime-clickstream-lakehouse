@@ -77,3 +77,14 @@ variable "source_code_hash" {
   default     = null
 }
 
+variable "lambda_layers" {
+  description = "List of Lambda layer ARNs to attach to the function"
+  type        = list(string)
+  default     = []
+}
+
+variable "python_command" {
+  description = "Python command to use for local-exec provisioner"
+  type        = string
+  default     = "python"
+}

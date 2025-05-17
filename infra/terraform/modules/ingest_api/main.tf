@@ -18,28 +18,52 @@ resource "local_file" "ensure_build_dir" {
   content  = "This file ensures the build directory exists"
 }
 
+# Create a copy of the source file with the correct name for Lambda
+# Also create a copy with a hash in the name to force archive_file to refresh
+resource "local_file" "source_file_copy" {
+  filename = "${path.module}/tmp/click_handler.py"
+  content  = file(local.handler_src)
 
-# 0. Create the Lambda handler ZIP package - Zip up handler directory
+  # Create the tmp directory if it doesn't exist
+  provisioner "local-exec" {
+    # Use Python script for cross-platform compatibility
+    # Use relative path without quotes to avoid Windows path issues
+    command = "${var.python_command} ${path.root}\\scripts\\create_directory.py ${path.module}\\tmp"
+  }
+}
+
+# Create the Lambda handler ZIP package - Zip up handler directory
 data "archive_file" "handler_zip" {
   type        = "zip"
-  source_file = local.handler_src
+  source_file = local_file.source_file_copy.filename
   output_path = local.zip_path
 
-  depends_on = [local_file.ensure_build_dir]
+  depends_on = [local_file.ensure_build_dir, local_file.source_file_copy]
 
 }
 
-# 1. Upload the Lambda ZIP to S3
+# Upload the Lambda ZIP to S3
 resource "aws_s3_object" "lambda_zip" {
   bucket       = var.code_s3_bucket
   key          = var.code_s3_key
   source       = data.archive_file.handler_zip.output_path
   content_type = "application/zip"
-  etag         = filemd5(data.archive_file.handler_zip.output_path)
+
+  # Use the source hash to ensure this is updated when the source file changes
+  # This is more reliable than using the etag of the zip file
+  etag         = local.source_hash
 
 }
 
-# 2. Lambda Function (reuse role from modules/iam)
+# Force recreation of the Lambda function when the source file changes
+resource "null_resource" "lambda_source_update_trigger" {
+  # This will change whenever the source file changes
+  triggers = {
+    source_hash = local.source_hash
+  }
+}
+
+# Lambda Function (reuse role from modules/iam)
 resource "aws_lambda_function" "ingest" {
   function_name = "${var.project}-ingest-${var.environment}"
   s3_bucket     = aws_s3_object.lambda_zip.bucket
@@ -49,8 +73,18 @@ resource "aws_lambda_function" "ingest" {
   role          = var.lambda_role_arn
   timeout       = var.lambda_timeout
 
-  source_code_hash = data.archive_file.handler_zip.output_base64sha256
+  # Use the source_code_hash passed from the parent module if provided, otherwise use the calculated hash
+  source_code_hash = var.source_code_hash != null ? var.source_code_hash : data.archive_file.handler_zip.output_base64sha256
 
+  # Depend on the trigger resource to force recreation when the source file changes
+  depends_on = [null_resource.lambda_source_update_trigger]
+
+  # Using container image
+  # package_type = "Image"
+  # image_uri    = "${aws_ecr_repository.lambda_repo.repository_url}:latest"
+
+  # Add Lambda layers
+  layers = var.lambda_layers
 
   environment {
     variables = {
@@ -67,6 +101,15 @@ resource "aws_lambda_function" "ingest" {
   }
 
   publish = true
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  # depends_on = [
+  #   null_resource.build_lambda_image
+  # ]
+
 }
 
 # 2) Create an alias
@@ -206,13 +249,73 @@ resource "aws_api_gateway_stage" "api_stage" {
   deployment_id = aws_api_gateway_deployment.this.id
   stage_name    = var.environment
 
-  variables = {
-    lambdaAlias = aws_lambda_alias.ingest_alias.name
-
-  }
+  # variables = {
+  #   lambdaAlias = aws_lambda_alias.ingest_alias.name
+  #
+  # }
 
   tags = {
     Project     = var.project
     Environment = var.environment
   }
+
+  # Ensures the stage is updated before the old deployment is destroyed
+  lifecycle {
+    create_before_destroy = true
+  }
+
 }
+
+
+# Create ECR repository
+resource "aws_ecr_repository" "lambda_repo" {
+  name = "${var.project}-ingest-${var.environment}"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
+#
+# # Build and push the Docker image
+# locals {
+#   is_windows = contains(regexall("^[A-Za-z]:\\\\", abspath(path.root)), abspath(path.root))
+# }
+#
+# resource "null_resource" "build_lambda_image" {
+#   # Rebuild when handler or Dockerfile changes
+#   triggers = {
+#     handler_hash    = filebase64sha256(var.code_local_path)
+#     dockerfile_hash = filebase64sha256("${path.module}/Dockerfile")
+#   }
+#
+#   provisioner "local-exec" {
+#     # Choose PowerShell on Windows, Bash elsewhere
+#     interpreter = ["bash","-c"]
+#
+#     command = <<-EOT
+#       # Set the build context to the project root directory
+#
+#       mkdir -p "${path.module}/tmp"
+#       cp "${local.handler_src}" \
+#          "${path.module}/tmp/click_handler.py"
+#
+#       # Build image
+#       docker build -t ${var.project}-ingest-${var.environment} \
+#         --file ${path.module}/Dockerfile \
+#         --build-arg LAMBDA_TASK_ROOT="/var/task" \
+#         ${path.module}
+#
+#       # Tag & push to ECR
+#       docker tag ${var.project}-ingest-${var.environment} \
+#         ${aws_ecr_repository.lambda_repo.repository_url}:latest
+#       aws ecr get-login-password --region ${var.region} \
+#         | docker login --username AWS --password-stdin ${aws_ecr_repository.lambda_repo.repository_url}
+#       docker push ${aws_ecr_repository.lambda_repo.repository_url}:latest
+#     EOT
+#   }
+#
+#   depends_on = [aws_ecr_repository.lambda_repo]
+# }
