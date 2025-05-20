@@ -114,7 +114,7 @@ module "ingest_api" {
   registry_name = module.glue.schema_registry_name
   schema_name   = module.glue.schema_name
 
-  lambda_layers = [module.lambda_layer.schema_registry_layer_arn]
+  lambda_layers = []
   depends_on = [module.bucket, module.stream, module.iam, module.glue, module.lambda_layer]
 
 }

@@ -6,7 +6,7 @@ import boto3
 from awsglue.context import GlueContext
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
-from pyspark.sql.functions import col, from_json, to_timestamp, to_date
+from pyspark.sql.functions import col, from_json, to_timestamp, to_date, current_timestamp, lit
 from pyspark.sql.types import StructType, StructField, StringType
 
 # ─── Logging setup ───────────────────────────────────────────────────────────
@@ -167,45 +167,74 @@ def _read_from_kinesis_stream(glue_context, stream_arn, aws_region, registry_nam
 
 def _transform_data(raw_df, json_schema):
     logger.info("Starting data transformation...")
-    # cols = raw_df.columns
-    # if not cols:
-    #     logger.warning("Raw DataFrame is empty, cannot transform.")
-    #     return raw_df  # Return empty DF
-
-    # json_col_name = cols[0]  # Assuming the first column is the JSON blob
-    # arrival_col_name = cols[1] if len(cols) > 1 else None
-
-    # exprs = [f"CAST(`{json_col_name}` AS STRING) AS json_str"]
-    # if arrival_col_name:
-    #     exprs.append(
-    #         f"`{arrival_col_name}` AS arrival_ingest_ts")  # Use a distinct name if already present in json_schema
-
-    # parsed_df = (
-    #     raw_df
-    #     .selectExpr(*exprs)
-    #     .select(from_json(col("json_str"), json_schema).alias("payload"))
-    #     .select("payload.*")
-    # )
-    # logger.info("Parsed DataFrame schema (after JSON parsing):")
-    if not raw_df.columns:
+    cols = raw_df.columns
+    if not cols:
         logger.warning("Raw DataFrame is empty, cannot transform.")
-        return raw_df
-    parsed_df = raw_df  # each field already a column after SR deserialisation
-    parsed_df.printSchema()
-    parsed_df.select("timestamp", "event_ts", "event_date").show(5, truncate=False)
+        return raw_df  # Return empty DF
+
+    logger.info(f"Raw DataFrame columns: {cols}")
+
+    # Check if data column exists (the JSON payload)
+    if 'data' in cols:
+        json_col_name = 'data'  # The column containing the JSON payload
+        arrival_col_name = 'approximateArrivalTimestamp' if 'approximateArrivalTimestamp' in cols else None
+
+        logger.info(f"Using '{json_col_name}' as JSON column and '{arrival_col_name}' as arrival timestamp")
+
+        exprs = [f"CAST(`{json_col_name}` AS STRING) AS json_str"]
+        if arrival_col_name:
+            exprs.append(f"`{arrival_col_name}` AS record_timestamp")
+
+        # Parse the JSON data
+        parsed_df = (
+            raw_df
+            .selectExpr(*exprs)
+            .select(from_json(col("json_str"), json_schema).alias("payload"), 
+                    col("record_timestamp") if arrival_col_name else None)
+            .select("payload.*", "record_timestamp")
+        )
+        logger.info("Parsed DataFrame schema (after JSON parsing):")
+        parsed_df.printSchema()
+    else:
+        # If data is already parsed (e.g., by schema registry), use it directly
+        logger.info("Data appears to be already parsed, using raw DataFrame")
+        parsed_df = raw_df
+        parsed_df.printSchema()
+
+    # Show sample data for debugging
+    logger.info("Sample data after parsing:")
+    # Using _collect_sample_data instead of show() for streaming DataFrame
+    _collect_sample_data(parsed_df.limit(5))
 
     # Use 'ingest_ts' from JSON payload if present, otherwise use Kinesis arrival time
     # This assumes 'ingest_ts' in your schema is the preferred one.
     # If Kinesis arrival time is different and also needed, ensure the column names are distinct.
     # For simplicity, this example prioritizes 'ingest_ts' from the JSON payload if it exists.
     iso_fmt = "yyyy-MM-dd'T'HH:mm:ss[.SSS]X"
-    df_with_event_ts = (
-        parsed_df.withColumn(
-            "event_ts", to_timestamp(col("timestamp"), iso_fmt))
-    )
+
+    # Check if 'timestamp' column exists
+    if 'timestamp' in parsed_df.columns:
+        df_with_event_ts = (
+            parsed_df.withColumn(
+                "event_ts", to_timestamp(col("timestamp"), iso_fmt))
+        )
+    else:
+        # If 'timestamp' doesn't exist but 'record_timestamp' does, use that
+        if 'record_timestamp' in parsed_df.columns:
+            logger.info("Using 'record_timestamp' instead of 'timestamp'")
+            df_with_event_ts = parsed_df.withColumnRenamed("record_timestamp", "event_ts")
+        else:
+            # If neither exists, create a current timestamp
+            logger.warning("Neither 'timestamp' nor 'record_timestamp' found, using current time")
+            df_with_event_ts = parsed_df.withColumn("event_ts", current_timestamp())
+
     logger.info("DataFrame schema with event_ts:")
     df_with_event_ts.printSchema()
-    parsed_df.select("timestamp", "event_ts", "event_date").show(5, truncate=False)
+
+    # Show sample data for debugging
+    logger.info("Sample data with event_ts:")
+    # Using _collect_sample_data instead of show() for streaming DataFrame
+    _collect_sample_data(df_with_event_ts.limit(5))
 
     df_with_event_date = df_with_event_ts.withColumn("event_date", to_date(col("event_ts")))
     logger.info("DataFrame schema with event_date (partition key):")
@@ -280,16 +309,29 @@ def _write_stream_to_s3(df, out_path, chkpt_path, spark_session):
     logger.info("Ensuring consistent data types for Parquet conversion...")
     # Ensure all expected columns are present and cast them
     # This is important to prevent schema evolution issues if a field is occasionally missing
-    final_df = df.select(
-        col("element").cast("string"),
-        col("page").cast("string"),
-        col("userAgent").cast("string"),
-        col("timestamp").cast("string"),  # Original timestamp string
-        col("ingest_ts").cast("string"),  # From JSON payload
-        col("request_id").cast("string"),
-        col("event_ts"),  # Derived timestamp type
-        col("event_date")  # Derived date type
-    )
+    # Create a list of columns to select, handling missing columns gracefully
+    select_cols = []
+
+    # Add columns if they exist, with appropriate casting
+    for column_name in ["element", "page", "userAgent", "ingest_ts", "request_id"]:
+        if column_name in df.columns:
+            select_cols.append(col(column_name).cast("string"))
+        else:
+            # If column doesn't exist, add a null column with the right name and type
+            select_cols.append(lit(None).cast("string").alias(column_name))
+
+    # Add timestamp column if it exists
+    if "timestamp" in df.columns:
+        select_cols.append(col("timestamp").cast("string"))
+    else:
+        # If timestamp doesn't exist, add a null column
+        select_cols.append(lit(None).cast("string").alias("timestamp"))
+
+    # Always include event_ts and event_date
+    select_cols.append(col("event_ts"))
+    select_cols.append(col("event_date"))
+
+    final_df = df.select(*select_cols)
     logger.info("Final DataFrame schema before S3 write:")
     final_df.printSchema()
 

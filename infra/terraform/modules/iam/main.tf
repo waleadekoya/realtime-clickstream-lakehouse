@@ -159,23 +159,7 @@ data "aws_iam_policy_document" "lambda_policy" {
     ]
     resources = ["arn:aws:logs:${var.region}:*:*"]
   }
-  statement {
-    sid       = "SchemaRegistryAccess"
-    actions   = [
-      "glue:GetRegistry",
-      "glue:GetSchema",
-      "glue:GetSchemaVersion",
-      "glue:CheckSchemaVersionValidity",
-      "glue:ListSchemas",
-      "glue:ListSchemaVersions",
-      "glue:RegisterSchemaVersion",
-      "glue:PutSchemaVersionMetadata"
-    ]
-    resources = [
-      "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:registry/*",
-      "arn:aws:glue:${var.region}:${data.aws_caller_identity.current.account_id}:schema/*"
-    ]
-  }
+  # Schema validation has been removed from the Lambda function and deferred to the Glue ETL job
 
 }
 

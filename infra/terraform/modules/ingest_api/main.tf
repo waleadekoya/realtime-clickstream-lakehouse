@@ -90,8 +90,6 @@ resource "aws_lambda_function" "ingest" {
     variables = {
       STREAM_NAME = var.stream_name
       REGION      = var.region
-      REGISTRY_NAME = var.registry_name
-      SCHEMA_NAME   = var.schema_name
     }
   }
 

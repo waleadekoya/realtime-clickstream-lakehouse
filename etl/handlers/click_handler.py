@@ -13,8 +13,6 @@ logger.setLevel(logging.INFO)
 # Initialize Kinesis client with proper error handling
 try:
     REGION = os.environ.get('REGION')
-    REGISTRY_NAME   = os.environ["REGISTRY_NAME"]
-    SCHEMA_NAME     = os.environ["SCHEMA_NAME"]
     kinesis = boto3.client("kinesis", region_name=REGION)
     STREAM = os.environ["STREAM_NAME"]
 except KeyError as e:
@@ -126,37 +124,8 @@ if os.path.exists('/opt/python'):
         logger.error(f"Failed to import orjson: {e}")
         # Continue anyway, as the schema registry import might still work
 
-try:
-    # First, try the standard import path
-    try:
-        from aws_glue_schema_registry import (
-            SchemaRegistryClient, # https://pypi.org/project/aws-glue-schema-registry/
-            JsonSchemaSerializer,
-        )
-        logger.info("Successfully imported aws_glue_schema_registry")
-    except ImportError:
-        # If that fails, try the alternate import path (without "glue_")
-        logger.info("Trying alternate import path aws_schema_registry")
-        from aws_schema_registry import (
-            SchemaRegistryClient,
-            JsonSchemaSerializer,
-        )
-        logger.info("Successfully imported aws_schema_registry")
-except ImportError as e:
-    logger.error(f"Failed to import schema registry module: {e}")
-    # Print sys.path for debugging
-    logger.error(f"sys.path: {sys.path}")
-    # List contents of /opt/python if it exists
-    if os.path.exists('/opt/python'):
-        logger.error(f"Contents of /opt/python: {os.listdir('/opt/python')}")
-    raise
-
-sr_client   = SchemaRegistryClient(region_name=REGION)
-serializer  = JsonSchemaSerializer(
-    schema_registry_client = sr_client,
-    schema_name            = SCHEMA_NAME,
-    registry_name          = REGISTRY_NAME,
-)
+# Schema validation has been removed and deferred to the Glue ETL job
+# This simplifies the Lambda function and reduces dependencies
 
 
 def lambda_handler(event, context):
@@ -189,11 +158,11 @@ def lambda_handler(event, context):
             logger.warning("No element specified in payload, using 'unknown'")
 
         # Send it to Kinesis with a more specific partition key strategy
-        serialized_payload = serializer.serialize(payload)   # validates + frames
+        # Schema validation is now deferred to the Glue ETL job
         response = kinesis.put_record(
             StreamName=STREAM,
             PartitionKey=payload.get("element", "unknown"),
-            Data=serialized_payload, # json.dumps(payload).encode("utf-8")
+            Data=json.dumps(payload).encode("utf-8")
         )
 
         logger.info(f"Successfully sent record to Kinesis: {response}")
