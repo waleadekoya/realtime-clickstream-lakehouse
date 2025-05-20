@@ -86,6 +86,7 @@ module "glue_network" {
 }
 
 # ---------- Ingest API Lambda ----------
+
 module "ingest_api" {
   source      = "./modules/ingest_api"
   project     = var.project
@@ -107,16 +108,50 @@ module "ingest_api" {
   # Add a source_code_hash parameter that changes when code changes
   source_code_hash = filebase64sha256("${path.module}/../../etl/handlers/click_handler.py")
 
-
   lambda_handler = "click_handler.lambda_handler"
 
   # Schema registry information
   registry_name = module.glue.schema_registry_name
   schema_name   = module.glue.schema_name
 
-  depends_on = [module.bucket, module.stream, module.iam, module.glue]
+  lambda_layers = []
+  depends_on = [module.bucket, module.stream, module.iam, module.glue, module.lambda_layer]
 
 }
+
+# Build schema registry layer - run before terraform operations
+resource "null_resource" "build_schema_registry_layer" {
+  # Use a more stable trigger that doesn't change on every apply
+  # This helps reduce unnecessary rebuilds while still allowing manual triggering when needed
+  triggers = {
+    # Hash of the build script itself - only rebuild when the script changes
+    build_script_hash = filesha256("${path.module}/scripts/build_layer.py")
+  }
+
+  # Create the layer
+  provisioner "local-exec" {
+    # Will create the directory and layer file if they don't exist
+    command = "${var.python_command} ${path.module}/scripts/build_layer.py"
+  }
+}
+
+
+module "lambda_layer" {
+  source      = "./modules/lambda_layer"
+  project     = var.project
+  environment = var.environment
+
+  lambda_layer_s3_bucket  = module.bucket.bucket_name
+  lambda_layer_s3_key     = "${var.project}/${var.environment}/layers/schema-registry-layer.zip"
+  lambda_layer_local_path = "${path.root}/../../etl/layer_packages/schema-registry-layer.zip"
+
+  depends_on = [
+    module.bucket,
+    null_resource.build_schema_registry_layer
+  ]
+}
+
+
 
 
 # Resource that ensures proper destruction order
@@ -169,12 +204,15 @@ resource "null_resource" "network_cleanup_helper" {
 }
 
 resource "null_resource" "inject_api_url_in_index" {
-  depends_on = [module.ingest_api]
+  # depends_on = [module.ingest_api]
 
   # Force this to run on every apply using a timestamp or uuid
   triggers = {
     # This makes the resource recreate and run on every apply
     always_run = timestamp()
+    function_name = "${var.project}-ingest-${var.environment}"
+    api_url = "https://${module.ingest_api.api_id}.execute-api.${var.aws_region}.amazonaws.com/${var.environment}"
+
   }
 
 
@@ -184,5 +222,3 @@ resource "null_resource" "inject_api_url_in_index" {
     EOT
   }
 }
-
-

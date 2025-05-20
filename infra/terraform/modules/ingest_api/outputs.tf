@@ -8,5 +8,12 @@ output "lambda_function_name" {
   value       = aws_lambda_function.ingest.function_name
 }
 
+output "api_id" {
+  description = "The ID of the API Gateway REST API"
+  value       = aws_api_gateway_rest_api.ingest_api.id
+}
+
+
+
 
 

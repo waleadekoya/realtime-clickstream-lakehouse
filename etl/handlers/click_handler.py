@@ -1,10 +1,12 @@
-import boto3
 import json
 import logging
 import os
+import sys
 import time
-from botocore.exceptions import ClientError
 
+import boto3
+
+# Set up a more detailed logger
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -20,9 +22,111 @@ except Exception as e:
     logger.error(f"Failed to initialize Kinesis client: {e}")
     raise
 
-glue_client = boto3.client('glue', region_name=REGION)
-REGISTRY_NAME = os.environ.get('REGISTRY_NAME')
-SCHEMA_NAME = os.environ.get('SCHEMA_NAME')
+# Add Lambda layer paths to sys.path to ensure modules can be found
+# Lambda layers are mounted at /opt in the Lambda runtime
+if os.path.exists('/opt/python'):
+    sys.path.insert(0, '/opt/python')
+    logger.info("Added /opt/python to sys.path")
+
+    # Handle orjson import issue - ensure orjson is properly available
+    try:
+        import orjson
+        import importlib.abc
+        import importlib.machinery
+
+        # Create a more robust solution using Python's import system
+        # This approach creates a custom finder and loader for the orjson.orjson module
+
+        class OrjsonLoader(importlib.abc.Loader):
+            """Custom loader for orjson.orjson that returns the orjson module itself."""
+
+            @staticmethod
+            def create_module(spec):
+                """Return None to use the default module creation."""
+                return None
+
+            @staticmethod
+            def exec_module(module):
+                """Execute the module by copying all attributes from orjson."""
+                # Copy all attributes from orjson to the new module
+                for attr_name in dir(orjson):
+                    if not attr_name.startswith('__'):
+                        setattr(module, attr_name, getattr(orjson, attr_name))
+
+                # Explicitly set dumps and loads functions
+                module.dumps = orjson.dumps
+                module.loads = orjson.loads
+
+                # Log success for debugging
+                logger.info(f"Successfully initialized orjson.orjson module")
+
+        class OrjsonFinder(importlib.abc.MetaPathFinder):
+            """Custom finder for orjson.orjson that returns our custom loader."""
+
+            @staticmethod
+            def find_spec(fullname, path, target=None):
+                """Find the orjson.orjson module and return a spec with our custom loader."""
+                if fullname == 'orjson.orjson':
+                    # Create a ModuleSpec with our custom loader
+                    return importlib.machinery.ModuleSpec(
+                        name=fullname,
+                        loader=OrjsonLoader(),
+                        is_package=False
+                    )
+                return None
+
+        # Register our custom finder at the beginning of sys.meta_path
+        # This ensures it's checked before the default finders
+        sys.meta_path.insert(0, OrjsonFinder())
+
+        # Also set up the orjson.orjson module directly in sys.modules as a fallback
+        # This handles the case where code directly accesses sys.modules
+        if 'orjson.orjson' not in sys.modules:
+            # Create a new module object
+            import types
+            orjson_orjson_module = types.ModuleType('orjson.orjson')
+
+            # Copy all attributes from orjson
+            for attr_name in dir(orjson):
+                if not attr_name.startswith('__'):
+                    setattr(orjson_orjson_module, attr_name, getattr(orjson, attr_name))
+
+            # Explicitly set dumps and loads functions
+            orjson_orjson_module.dumps = orjson.dumps
+            orjson_orjson_module.loads = orjson.loads
+
+            # Add the module to sys.modules
+            sys.modules['orjson.orjson'] = orjson_orjson_module
+
+        # Test the import to verify it works
+        try:
+            # Try both import styles to ensure they work
+            import orjson.orjson
+            from orjson.orjson import dumps, loads
+
+            # Verify the functions work as expected
+            test_data = {"test": "data"}
+            encoded = dumps(test_data)
+            decoded = loads(encoded)
+            assert decoded == test_data, "Serialization/deserialization test failed"
+
+            # Verify that orjson.orjson is properly set up
+            logger.info(f"Verification: Successfully imported and tested orjson.orjson")
+            logger.info(f"orjson module ID: {id(orjson)}")
+            logger.info(f"orjson.orjson module ID: {id(orjson.orjson)}")
+            logger.info(f"orjson.dumps == orjson.orjson.dumps: {orjson.dumps is orjson.orjson.dumps}")
+        except (ImportError, AssertionError) as e:
+            logger.error(f"Verification failed: Could not import or use orjson.orjson after setup: {e}")
+            # Don't raise, continue with the import attempt
+
+        logger.info("Successfully set up orjson.orjson module")
+    except ImportError as e:
+        logger.error(f"Failed to import orjson: {e}")
+        # Continue anyway, as the schema registry import might still work
+
+# Schema validation has been removed and deferred to the Glue ETL job
+# This simplifies the Lambda function and reduces dependencies
+
 
 def lambda_handler(event, context):
     try:
@@ -53,86 +157,8 @@ def lambda_handler(event, context):
         if not payload.get("element"):
             logger.warning("No element specified in payload, using 'unknown'")
 
-        # ----- SCHEMA VALIDATION WITH GLUE SCHEMA REGISTRY -----
-        # Only perform validation if registry configuration is available
-        logger.info(f"Schema Registry Config - Registry: {REGISTRY_NAME}, Schema: {SCHEMA_NAME}, Region: {REGION}")
-
-        try:
-        # Try to connect to the schema registry
-            resp = glue_client.get_schema_version(
-                SchemaId={
-                    'RegistryName': REGISTRY_NAME,
-                    'SchemaName': SCHEMA_NAME
-                },
-                SchemaVersionNumber={'LatestVersion': True}
-            )
-            logger.info(f"Successfully connected to schema registry: {resp}")
-        except Exception as err:
-            logger.error(f"Error connecting to schema registry: {str(err)}")
-            return None
-
-
-        if REGISTRY_NAME and SCHEMA_NAME:
-            try:
-                logger.info(f"Validating against schema {REGISTRY_NAME}/{SCHEMA_NAME}")
-
-                # First, get the schema definition
-                schema_response = glue_client.get_schema_version(
-                    SchemaId={
-                        'RegistryName': REGISTRY_NAME,
-                        'SchemaName': SCHEMA_NAME
-                    },
-                    SchemaVersionNumber={'LatestVersion': True}
-                )
-
-                # Extract the schema definition
-                schema_definition = schema_response.get('SchemaDefinition')
-
-
-
-                # Check validation result
-                if not schema_definition:
-                    logger.error("Failed to get schema definition")
-                    return {
-                        "statusCode": 500,
-                        "headers": {
-                            "Content-Type": "application/json",
-                            "Access-Control-Allow-Origin": "*"
-                        },
-                        "body": json.dumps({
-                            "error": "Schema validation error",
-                            "details": "Failed to retrieve schema definition"
-                        })
-                    }
-
-
-                # Convert payload to JSON string for validation
-                payload_json = json.dumps(payload)
-                schema = json.loads(schema_definition)
-                logger.info(f"Schema validation passed. Schema: {schema}")
-            except ClientError as err:
-                error_code = err.response.get('Error', {}).get('Code', '')
-                # Log error but continue - let Glue validate on the consumer side
-                logger.warning(f"Schema validation error (code: {error_code}): {str(err)}")
-
-                # If it's a critical error like missing schema, Fail
-                if error_code in ['ResourceNotFoundException', 'AccessDeniedException']:
-                    return {
-                        "statusCode": 500,
-                        "headers": {
-                            "Content-Type": "application/json",
-                            "Access-Control-Allow-Origin": "*"
-                        },
-                        "body": json.dumps({
-                            "error": "Schema validation configuration error",
-                            "details": str(err)
-                        })
-                    }
-        else:
-            logger.warning("Schema Registry configuration not found, skipping validation")
-
-
         # Send it to Kinesis with a more specific partition key strategy
+        # Schema validation is now deferred to the Glue ETL job
         response = kinesis.put_record(
             StreamName=STREAM,
             PartitionKey=payload.get("element", "unknown"),
